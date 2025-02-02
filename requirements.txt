@@ -1,0 +1,10 @@
+Flask
+Flask-SQLAlchemy
+Flask-Bcrypt
+Flask-Login
+flask_migrate
+flask_cors
+pywhatkit
+phonenumbers
+pytz
+tzdata
