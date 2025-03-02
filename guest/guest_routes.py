@@ -348,29 +348,17 @@ def check_rooms_status():
     booked_rooms_details = [
         {
             'room_number': room.room_number,
-            'room_type': room.room_type,
-            'is_ac': room.is_ac,
-            'duration_of_stay': [
-                association.booking.duration_of_stay
-                for association in room.booking_associations
-                if association.booking.status in ["Checked-In", "Confirmed"]
-            ],
-            'check_in_dates': [
-                association.booking.check_in_date
-                for association in room.booking_associations
-                if association.booking.status in ["Checked-In", "Confirmed"]
-            ],
-            'probable_check_out_dates': [
-                association.booking.expected_check_out_date
-                for association in room.booking_associations
-                if association.booking.status in ["Checked-In", "Confirmed"]
-            ],
             'bookings': [
                 {
                     'booking_id': association.booking.id,
                     'customer_name': association.booking.customer.name,
                     'customer_contact': association.booking.customer.phone,
-                    #'extra_persons': association.booking.extra_persons,
+                    'check_in_date': association.booking.check_in_date,  # Include check-in date
+                    'probable_check_out_date': association.booking.expected_check_out_date,  # Include check-out date
+                    'duration_of_stay': association.booking.duration_of_stay,  # Include duration of stay
+                    'room_type': room.room_type,  # Include room type
+                    'is_ac': room.is_ac,  # Include AC status
+                    'occupancy': room.occupancy,  # Include occupancy
                     'payment_details': [
                         {
                             'payment_id': payment.id,
@@ -379,11 +367,18 @@ def check_rooms_status():
                         }
                         for payment in association.booking.payments
                     ],
-                    'booking_status':  association.booking.status,
+                    'booking_status': association.booking.status,
                     'final_price_per_night': association.booking.final_price_per_night
                 }
                 for association in room.booking_associations
-                if association.booking.status in ["Checked-In", "Confirmed"]
+                if (
+                        association.booking.status in ["Checked-In", "Confirmed"] and
+                        association.booking.check_in_date < target_check_out_date and
+                        (
+                                association.booking.expected_check_out_date is None or
+                                association.booking.expected_check_out_date > target_check_in_date
+                        )
+                )
             ]
         }
         for room in booked_rooms_list
@@ -673,6 +668,9 @@ def check_rooms_dashboard():
             room = room_association.room  # Replace with the correct property or query if needed
             checked_out_rooms.add((room.id, room.room_number))  # Collect both ID and number
     print(checked_out_rooms)
+
+
+
     # Step 1: Get all active bookings
     active_bookings = model_routes.Booking.query.filter(
         model_routes.Booking.status.in_(["Confirmed", "Checked-In"])
@@ -694,6 +692,7 @@ def check_rooms_dashboard():
                 # Fetch room details (assuming room_association.room provides access to room object)
                 room = room_association.room  # Replace with the correct property or query if needed
                 booked_rooms.add((room.id, room.room_number))  # Collect both ID and number
+
     # Step 4: Fetch all rooms with matching room numbers
     # Extract room numbers from the booked_rooms set
     booked_room_numbers = [room_number for _, room_number in booked_rooms]
@@ -720,30 +719,17 @@ def check_rooms_dashboard():
     booked_rooms_details = [
         {
             'room_number': room.room_number,
-            'room_type': room.room_type,
-            'occupancy': room.occupancy,
-            'is_ac': room.is_ac,
-            'duration_of_stay': [
-                association.booking.duration_of_stay
-                for association in room.booking_associations
-                if association.booking.status in ["Checked-In", "Confirmed"]
-            ],
-            'check_in_dates': [
-                association.booking.check_in_date
-                for association in room.booking_associations
-                if association.booking.status in ["Checked-In", "Confirmed"]
-            ],
-            'probable_check_out_dates': [
-                association.booking.expected_check_out_date
-                for association in room.booking_associations
-                if association.booking.status in ["Checked-In", "Confirmed"]
-            ],
             'bookings': [
                 {
                     'booking_id': association.booking.id,
                     'customer_name': association.booking.customer.name,
                     'customer_contact': association.booking.customer.phone,
-                    #'extra_persons': association.booking.extra_persons,
+                    'check_in_date': association.booking.check_in_date,  # Include check-in date
+                    'probable_check_out_date': association.booking.expected_check_out_date,  # Include check-out date
+                    'duration_of_stay': association.booking.duration_of_stay,  # Include duration of stay
+                    'room_type': room.room_type,  # Include room type
+                    'is_ac': room.is_ac,  # Include AC status
+                    'occupancy': room.occupancy,  # Include occupancy
                     'payment_details': [
                         {
                             'payment_id': payment.id,
@@ -752,45 +738,40 @@ def check_rooms_dashboard():
                         }
                         for payment in association.booking.payments
                     ],
-                    'booking_status':  association.booking.status,
+                    'booking_status': association.booking.status,
                     'final_price_per_night': association.booking.final_price_per_night
                 }
                 for association in room.booking_associations
-                if association.booking.status in ["Checked-In", "Confirmed"]
+                if (
+                        association.booking.status in ["Checked-In", "Confirmed"] and
+                        association.booking.check_in_date < end_of_day and
+                        (
+                                association.booking.expected_check_out_date is None or
+                                association.booking.expected_check_out_date > start_of_day
+                        )
+                )
             ]
         }
         for room in booked_rooms_list
     ]
+
 
     print("!!!!!!!!!!!!!!!!!!!!!!!!!!!")
     print(booked_rooms_details)
     checked_out_rooms_details = [
         {
             'room_number': room.room_number,
-            'room_type': room.room_type,
-            'occupancy': room.occupancy,
-            'is_ac': room.is_ac,
-            'duration_of_stay': [
-                association.booking.duration_of_stay
-                for association in room.booking_associations
-                if association.booking.status in ["Checked-Out"]
-            ],
-            'check_in_dates': [
-                association.booking.check_in_date
-                for association in room.booking_associations
-                if association.booking.status in ["Checked-Out"]
-            ],
-            'probable_check_out_dates': [
-                association.booking.expected_check_out_date
-                for association in room.booking_associations
-                if association.booking.status in ["Checked-Out"]
-            ],
             'bookings': [
                 {
                     'booking_id': association.booking.id,
                     'customer_name': association.booking.customer.name,
                     'customer_contact': association.booking.customer.phone,
-                    #'extra_persons': association.booking.extra_persons,
+                    'check_in_date': association.booking.check_in_date,  # Include check-in date
+                    'probable_check_out_date': association.booking.expected_check_out_date,  # Include check-out date
+                    'duration_of_stay': association.booking.duration_of_stay,  # Include duration
+                    'room_type': room.room_type,  # Include room type
+                    'is_ac': room.is_ac,  # Include AC status
+                    'occupancy': room.occupancy,  # Include occupancy
                     'payment_details': [
                         {
                             'payment_id': payment.id,
@@ -799,7 +780,7 @@ def check_rooms_dashboard():
                         }
                         for payment in association.booking.payments
                     ],
-                    'booking_status':  association.booking.status,
+                    'booking_status': association.booking.status,
                     'final_price_per_night': association.booking.final_price_per_night
                 }
                 for association in room.booking_associations
