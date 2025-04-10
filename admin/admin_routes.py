@@ -160,9 +160,17 @@ def register_room_():
         {"room_number": "305", "occupancy": "Double", "room_type": "Luxury", "is_ac": False, "price_per_night": 1500.0,
          "extra_bed_price": 300.0},
     # AC ROOMS
+		{"room_number": "101", "occupancy": "Single", "room_type": "Luxury", "is_ac": True, "price_per_night": 1600.0,
+         "extra_bed_price": 300.0},
+		{"room_number": "101", "occupancy": "Double", "room_type": "Luxury", "is_ac": True, "price_per_night": 1800.0,
+         "extra_bed_price": 300.0},
         {"room_number": "201", "occupancy": "Single", "room_type": "Luxury", "is_ac": True, "price_per_night": 1600.0,
          "extra_bed_price": 300.0},
         {"room_number": "201", "occupancy": "Double", "room_type": "Luxury", "is_ac": True, "price_per_night": 1800.0,
+         "extra_bed_price": 300.0},
+		{"room_number": "203", "occupancy": "Single", "room_type": "Luxury", "is_ac": True, "price_per_night": 1600.0,
+         "extra_bed_price": 300.0},
+        {"room_number": "203", "occupancy": "Double", "room_type": "Luxury", "is_ac": True, "price_per_night": 1800.0,
          "extra_bed_price": 300.0},
         {"room_number": "205", "occupancy": "Single", "room_type": "Luxury", "is_ac": True, "price_per_night": 1600.0,
          "extra_bed_price": 300.0},
@@ -177,7 +185,23 @@ def register_room_():
         {"room_number": "305", "occupancy": "Single", "room_type": "Luxury", "is_ac": True, "price_per_night": 1600.0,
          "extra_bed_price": 300.0},
         {"room_number": "305", "occupancy": "Double", "room_type": "Luxury", "is_ac": True, "price_per_night": 1800.0,
-         "extra_bed_price": 300.0}
+         "extra_bed_price": 300.0},
+		{"room_number": "304", "occupancy": "Single", "room_type": "Studio", "is_ac": True, "price_per_night": 1400.0,
+         "extra_bed_price": 300.0},
+        {"room_number": "304", "occupancy": "Double", "room_type": "Studio", "is_ac": True, "price_per_night": 1600.0,
+         "extra_bed_price": 300.0},
+		{"room_number": "302", "occupancy": "Single", "room_type": "Studio", "is_ac": True, "price_per_night": 1400.0,
+         "extra_bed_price": 300.0},
+        {"room_number": "302", "occupancy": "Double", "room_type": "Studio", "is_ac": True, "price_per_night": 1600.0,
+         "extra_bed_price": 300.0},
+		{"room_number": "204", "occupancy": "Single", "room_type": "Studio", "is_ac": True, "price_per_night": 1400.0,
+         "extra_bed_price": 300.0},
+        {"room_number": "204", "occupancy": "Double", "room_type": "Studio", "is_ac": True, "price_per_night": 1600.0,
+         "extra_bed_price": 300.0},
+		{"room_number": "202", "occupancy": "Single", "room_type": "Studio", "is_ac": True, "price_per_night": 1400.0,
+         "extra_bed_price": 300.0},
+        {"room_number": "202", "occupancy": "Double", "room_type": "Studio", "is_ac": True, "price_per_night": 1600.0,
+         "extra_bed_price": 300.0}	 
     ]
 
     # Insert each room into the database
