@@ -31,7 +31,6 @@ def format_phone_number(phone_number, default_country="IN"):
 def create_booking():
     try:
         data = request.json
-
         # Personal Info
         name = data['personal_info']['name']
         address = data['personal_info']['address']
@@ -67,7 +66,9 @@ def create_booking():
         mode = data['stay_info']['bookingMode']
 
         status = data['bookingStatus']
+        check_in_date = datetime.strptime(data['stay_info']['checkInDateTime'], '%Y-%m-%dT%H:%M:%S.%fZ')
         payment_mode = data['payment_info']['paymentMode']
+        payment_date = datetime.strptime(data['payment_info']['paymentDate'], '%Y-%m-%dT%H:%M:%S.%fZ')
         payment_amount = float(data['payment_info']['paymentAmount'])
         final_price_per_night = float(data['payment_info']['finalPricePerNight'])
         total_price = final_price_per_night * duration_of_stay
@@ -91,6 +92,7 @@ def create_booking():
                 payment_amount=payment_amount,
                 payment_mode=payment_mode,
                 payment_status="",
+                payment_date=payment_date,
                 notes=None
             )
 
@@ -513,11 +515,15 @@ def get_payments_by_date():
 @guest_bp.route('/api/update_payment', methods=['POST'])
 def add_or_remove_payment():
     data = request.json
+    print(data)
     payment_mode = data['paymentMode']
     booking_id = data['bookingId']
     payment_amount = data['paymentAmount']
     transaction_type = data['transactionType']
     payment_note = data['paymentNote']
+    print("####")
+    print(data['paymentDate'])
+    payment_date = datetime.strptime(data['paymentDate'], '%Y-%m-%dT%H:%M:%S.%fZ')
     if payment_note == "":
         payment_note = None
     booking = get_booking_details_by_booking_id(booking_id)
@@ -546,6 +552,7 @@ def add_or_remove_payment():
         payment_amount=payment_amount,
         payment_mode=payment_mode,
         payment_status=payment_status,  # Set conditionally
+        payment_date=payment_date,
         notes=payment_note
     )
     model_routes.db.session.add(payment)
@@ -576,6 +583,7 @@ def cancel_or_checkout_booking():
     booking_id = data.get("bookingId")
     booking_status = data.get("bookingStatus")
     stay_duration = data.get("stayDuration")
+    check_out_date = datetime.strptime(data.get('checkOutDateTime'), '%Y-%m-%dT%H:%M:%S.%fZ')
     if not booking_id:
         return jsonify({"error": "Booking ID is required"}), 400
     # Fetch the booking from the database
@@ -589,11 +597,12 @@ def cancel_or_checkout_booking():
     message = None
     if booking_status == "Checked-In":
         booking.duration_of_stay = stay_duration
-        booking.check_out_date = datetime.now(timezone.utc)
+        booking.check_out_date = check_out_date
         booking.status = "Checked-Out"
         message = "CheckOut Successful"
     elif booking_status == "Confirmed":
         booking.duration_of_stay = 0
+        booking.check_out_date = check_out_date
         booking.status = "Cancelled"
         message = "Cancellation Successful"
 
