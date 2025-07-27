@@ -112,7 +112,7 @@ class GSTBillMapping(db.Model):
     gst_bill_no = db.Column(db.String(50), unique=True, nullable=False)
     guest_gst_no = db.Column(db.String(50))
     gst_bill_date = db.Column(db.Date, default=datetime.utcnow, nullable=False)
-
+    guest_company_name = db.Column(db.String(100))  # ✅ New field
     # Relationship
     booking = db.relationship('Booking', back_populates='gst_bill_mapping')
 

@@ -3,7 +3,7 @@ from flask import request, jsonify
 from datetime import datetime, timedelta
 from guest.utility import *
 from model import model_routes
-#import pywhatkit as kit
+import pywhatkit as kit
 import phonenumbers
 from sqlalchemy import and_, or_
 from datetime import datetime, timezone
@@ -163,6 +163,7 @@ def search_booking():
     gst_mapping = model_routes.GSTBillMapping.query.filter_by(booking_id=booking.id).first()
     gst_bill_no = gst_mapping.gst_bill_no if gst_mapping else None
     guest_gst_no = gst_mapping.guest_gst_no if gst_mapping else None
+    guest_company_name = gst_mapping.guest_company_name if gst_mapping else None
 
     result.append({
             'booking_id': booking.id,
@@ -202,6 +203,7 @@ def search_booking():
             'gst_info': {
                 'gst_bill_no': gst_bill_no,
                 'guest_gst_no': guest_gst_no,
+                'guest_company_name': guest_company_name
             }
         })
 
@@ -561,20 +563,20 @@ def add_or_remove_payment():
     return jsonify({'message': payment_message, 'booking_id': booking.id}), 200
 
 
-# @guest_bp.route('/api/message', methods=['POST'])
-# def send_whatsapp_message():
-#     data = request.get_json()
-#     phone_number = data['phoneNumber']
-#     # phone_number = '+91' + phone_number
-#     phone_number = format_phone_number(phone_number)
-#     message = data['message']
-#     try:
-#         # Use pywhatkit to send a message instantly
-#         kit.sendwhatmsg_instantly(phone_number, message, wait_time=15)
-#         return jsonify({'message': 'Message Sent successfully'}), 201
-#     except Exception as e:
-#         return jsonify({'error': 'Message Sending Failed ..'}), 201
-#
+@guest_bp.route('/api/send-message', methods=['POST'])
+def send_whatsapp_message():
+    data = request.get_json()
+    phone_number = data['phoneNumber']
+    # phone_number = '+91' + phone_number
+    phone_number = format_phone_number(phone_number)
+    message = data['message']
+    try:
+        # Use pywhatkit to send a message instantly
+        kit.sendwhatmsg_instantly(phone_number, message, wait_time=15)
+        return jsonify({'message': 'Message Sent successfully'}), 201
+    except Exception as e:
+        return jsonify({'error': 'Message Sending Failed ..'}), 201
+
 
 @guest_bp.route('/api/update_booking', methods=['POST'])
 def cancel_or_checkout_booking():
@@ -887,6 +889,7 @@ def update_booking():
 def get_gst_bill_number():
     booking_id = request.args.get('bookingId')
     guest_gst_no = request.args.get('guestGSTNumber')
+    company_name = request.args.get('companyName')
 
     print(booking_id)
     # Get the current date and fiscal year
@@ -906,13 +909,28 @@ def get_gst_bill_number():
     result = []
 
     if mapping:
+        updated = False
+
+        if mapping.guest_gst_no != guest_gst_no:
+            mapping.guest_gst_no = guest_gst_no
+            updated = True
+
+        if mapping.guest_company_name != company_name:
+            mapping.guest_company_name = company_name
+            updated = True
+
+        if updated:
+            model_routes.db.session.commit()
+
         result.append({
             'gst_bill_no': mapping.gst_bill_no,
             'guest_gst_no': mapping.guest_gst_no,
+            'guest_company_name': mapping.guest_company_name,
             'gst_bill_date': mapping.gst_bill_date
         })
 
         return jsonify({'gstDetails': result}), 200
+
 
     # Get the latest GST bill number for the current fiscal year and month
     latest_mapping = (
@@ -935,12 +953,14 @@ def get_gst_bill_number():
     new_gst_bill_no = f"HSK/{fiscal_year}/{current_month}/{next_number:03d}"  # Example: HSK/FY2024-25/04/001
 
     # Save to database
-    new_mapping = model_routes.GSTBillMapping(booking_id=booking_id, gst_bill_no=new_gst_bill_no, guest_gst_no=guest_gst_no)
+    new_mapping = model_routes.GSTBillMapping(booking_id=booking_id, gst_bill_no=new_gst_bill_no, 
+                                              guest_gst_no=guest_gst_no, guest_company_name=company_name)
     model_routes.db.session.add(new_mapping)
     model_routes.db.session.commit()
     result.append({
         'gst_bill_no': new_gst_bill_no,
         'guest_gst_no': guest_gst_no,
+        'guest_company_name': company_name,
         'gst_bill_date': datetime.utcnow()
     })
 
