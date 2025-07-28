@@ -3,7 +3,7 @@ from flask import request, jsonify
 from datetime import datetime, timedelta
 from guest.utility import *
 from model import model_routes
-import pywhatkit as kit
+#import pywhatkit as kit
 import phonenumbers
 from sqlalchemy import and_, or_
 from datetime import datetime, timezone
@@ -563,19 +563,20 @@ def add_or_remove_payment():
     return jsonify({'message': payment_message, 'booking_id': booking.id}), 200
 
 
-@guest_bp.route('/api/send-message', methods=['POST'])
-def send_whatsapp_message():
-    data = request.get_json()
-    phone_number = data['phoneNumber']
-    # phone_number = '+91' + phone_number
-    phone_number = format_phone_number(phone_number)
-    message = data['message']
-    try:
-        # Use pywhatkit to send a message instantly
-        kit.sendwhatmsg_instantly(phone_number, message, wait_time=15)
-        return jsonify({'message': 'Message Sent successfully'}), 201
-    except Exception as e:
-        return jsonify({'error': 'Message Sending Failed ..'}), 201
+# @guest_bp.route('/api/send-message', methods=['POST'])
+# def send_whatsapp_message():
+#     data = request.get_json()
+#     phone_number = data['phoneNumber']
+#     # phone_number = '+91' + phone_number
+#     phone_number = format_phone_number(phone_number)
+#     message = data['message']
+#     try:
+#         # Use pywhatkit to send a message instantly
+#         kit.sendwhatmsg_instantly(phone_number, message, wait_time=15)
+#         return jsonify({'message': 'Message Sent successfully'}), 201
+#     except Exception as e:
+#         return jsonify({'error': 'Message Sending Failed ..'}), 201
+
 
 
 @guest_bp.route('/api/update_booking', methods=['POST'])
