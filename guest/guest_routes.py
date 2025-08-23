@@ -499,16 +499,17 @@ def check_rooms_dashboard():
                     'guest_company_name': guest_company_name
                 }
             })
-
         # 🔹 Available rooms (rooms not in booked_room_numbers)
         all_rooms = model_routes.Room.query.all()
-        available_rooms = [
-            {
-                'room_number': room.room_number,
-                'room_type': room.room_type
-            }
-            for room in all_rooms if room.room_number not in booked_room_numbers
-        ]
+        seen = set()
+        available_rooms = []
+        for room in all_rooms:
+            if room.room_number not in booked_room_numbers and room.room_number not in seen:
+                available_rooms.append({
+                    'room_number': room.room_number,
+                    'room_type': room.room_type
+                })
+                seen.add(room.room_number)
 
         return jsonify({'bookings': booking_details, 'available_rooms': available_rooms}), 200
 
