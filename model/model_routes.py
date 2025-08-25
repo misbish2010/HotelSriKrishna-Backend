@@ -38,6 +38,7 @@ class BookingRoom(db.Model):
     booking_id = db.Column(db.Integer, db.ForeignKey('bookings.id'), nullable=False)
     room_id = db.Column(db.Integer, db.ForeignKey('rooms.id'), nullable=False)
     extra_persons = db.Column(db.Integer, default=0)
+    final_price_per_night = db.Column(db.Float, nullable=True)
     # Relationships
     room = db.relationship('Room', back_populates='booking_associations')
     booking = db.relationship('Booking', back_populates='room_associations')
