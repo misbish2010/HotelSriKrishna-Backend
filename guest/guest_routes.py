@@ -356,7 +356,7 @@ def update_booking():
                     payment_date=payment_date or datetime.utcnow(),
                     payment_mode=p.get('mode'),
                     notes=p.get('notes', ''),
-                    payment_status=p.get('status', 'pending')
+                    payment_status=p.get('status', 'completed')
                 )
                 model_routes.db.session.add(payment)
 
