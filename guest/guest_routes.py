@@ -44,76 +44,90 @@ def retrieve_customer():
     return jsonify({"error": "No Customer Details Found"}), 201
 
 
+import traceback
+
 @guest_bp.route("/api/create-booking", methods=["POST"])
 def create_booking():
     try:
         data = request.get_json()
-        print(data)
+        print("Incoming booking payload:", data)
+
         personal_info = data.get("personal_info", {})
         stay_info = data.get("stay_info", {})
         rooms_data = data.get("rooms", [])
-        payment_info = data.get("payment_info", {})
+        pricing_info = data.get("pricing_info", {})  # contract/price details
+        payments = data.get("payment_info", [])      # list of transactions
 
         # ---- 1. Create or fetch customer ----
-        customer = model_routes.Customer.query.filter_by(phone=personal_info["phone"]).first()
+        customer = model_routes.Customer.query.filter_by(phone=personal_info.get("phone")).first()
         if not customer:
             customer = model_routes.Customer(
-                name=personal_info["name"],
+                name=personal_info.get("name"),
                 address=personal_info.get("address", ""),
                 email=personal_info.get("email", ""),
                 identity=personal_info.get("identity", ""),
-                phone=personal_info["phone"]
+                phone=personal_info.get("phone")
             )
             model_routes.db.session.add(customer)
             model_routes.db.session.flush()
+
         # ---- 2. Create booking ----
+        check_in = datetime.strptime(stay_info['checkInDateTime'], '%Y-%m-%dT%H:%M:%S.%fZ')
+        check_out = datetime.strptime(stay_info['probableCheckOutDateTime'], '%Y-%m-%dT%H:%M:%S.%fZ')
+
         booking = model_routes.Booking(
             customer_id=customer.id,
-            check_in_date = datetime.strptime(stay_info['checkInDateTime'], '%Y-%m-%dT%H:%M:%S.%fZ'),
-            expected_check_out_date = datetime.strptime(stay_info['probableCheckOutDateTime'], '%Y-%m-%dT%H:%M:%S.%fZ'),
-            duration_of_stay=stay_info["durationOfStay"],
+            check_in_date=check_in,
+            expected_check_out_date=check_out,
+            duration_of_stay=stay_info.get("durationOfStay", 0),
             status=data.get("bookingStatus", "Confirmed"),
             mode=stay_info.get("bookingMode", "WALKIN"),
-            total_price=payment_info.get("totalPrice", 0),
-            final_price_per_night=payment_info.get("finalPricePerNight") or 0
+            total_price=pricing_info.get("totalPrice", 0),
+            final_price_per_night=pricing_info.get("finalPricePerNight", 0)
         )
         model_routes.db.session.add(booking)
         model_routes.db.session.flush()
+
         # ---- 3. Add rooms ----
         for idx, room in enumerate(rooms_data):
+            agreed_price = (
+                pricing_info.get("roomAgreedPrices", [{}])[idx].get("agreedPrice")
+                if pricing_info.get("roomAgreedPrices") else None
+            )
             booking_room = model_routes.BookingRoom(
                 booking_id=booking.id,
-                room_id=room["roomId"],
+                room_id=room.get("roomId"),
                 extra_persons=room.get("extraPersons", 0),
-                # store per-room agreed price if present
-                final_price_per_night=(
-                    payment_info.get("roomAgreedPrices", [{}])[idx].get("agreedPrice")
-                    if payment_info.get("roomAgreedPrices") else None
-                )
+                final_price_per_night=agreed_price
             )
             model_routes.db.session.add(booking_room)
 
-        # ---- 4. Add payment ----
-        if payment_info.get("paymentAmount"):
-            payment_date_str = payment_info.get("paymentDate")
-            payment_date = datetime.strptime(payment_date_str, "%Y-%m-%d") if payment_date_str else datetime.utcnow()
+        # ---- 4. Add payment(s) ----
+        for p in payments:
+            payment_date = None
+            if p.get("date"):
+                try:
+                    payment_date = datetime.strptime(p["date"], "%Y-%m-%d")
+                except Exception:
+                    payment_date = datetime.utcnow()
 
             payment = model_routes.Payment(
                 booking_id=booking.id,
-                payment_amount=payment_info["paymentAmount"],
-                payment_date=payment_date,
-                payment_mode=payment_info.get("paymentMode", ""),
-                payment_status="completed",  # or dynamic status if needed
-                notes=f"Extra Person Charges: {payment_info.get('extraPersonCharges', 0)}"
+                payment_amount=p.get("amount", 0),
+                payment_date=payment_date or datetime.utcnow(),
+                payment_mode=p.get("mode", ""),
+                payment_status=p.get("status", "completed"),
+                notes=p.get("notes", "")
             )
             model_routes.db.session.add(payment)
 
         model_routes.db.session.commit()
-
         return jsonify({"success": True, "booking_id": booking.id})
 
     except Exception as e:
         model_routes.db.session.rollback()
+        print("Error during booking creation:", str(e))
+        traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
 
@@ -326,6 +340,13 @@ def update_booking():
                         final_price_per_night=room.get('final_price_per_night')  # use provided
                     )
                     booking.room_associations.append(assoc)
+
+        # 5️⃣ Pricing Info
+        pricing_info = data.get('pricing_info')
+        if pricing_info:
+            booking.total_price = pricing_info.get("totalPrice", booking.total_price)
+            booking.final_price_per_night = pricing_info.get("finalPricePerNight", booking.final_price_per_night)
+            # You could also persist gstRate here if your model has a field for it
 
         # 5️⃣ GST Info (optional)
         gst_info = data.get('gstInfo')
