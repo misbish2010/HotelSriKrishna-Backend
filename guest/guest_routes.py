@@ -116,7 +116,7 @@ def create_booking():
                 payment_amount=p.get("amount", 0),
                 payment_date=payment_date or datetime.utcnow(),
                 payment_mode=p.get("mode", ""),
-                payment_status=p.get("status", "completed"),
+                payment_status=p.get("status", "paid"),
                 notes=p.get("notes", "")
             )
             model_routes.db.session.add(payment)
@@ -377,7 +377,7 @@ def update_booking():
                     payment_date=payment_date or datetime.utcnow(),
                     payment_mode=p.get('mode'),
                     notes=p.get('notes', ''),
-                    payment_status=p.get('status', 'completed')
+                    payment_status=p.get('status', 'paid')
                 )
                 model_routes.db.session.add(payment)
 
@@ -499,7 +499,7 @@ def check_rooms_dashboard():
                         'status': p.payment_status
                     }
                     for p in booking.payments
-                    if p.payment_status != "applied" #or p.payment_status != "Discount"
+                    if p.payment_status != "applied" or p.payment_status != "Discount"
                 ],
                 'room_details': [
                     {
