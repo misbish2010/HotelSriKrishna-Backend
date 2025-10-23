@@ -193,6 +193,29 @@ def check_available_rooms():
         return jsonify({'error': str(e)}), 500
 
 
+
+@guest_bp.route('/api/all-rooms', methods=['GET'])
+def fetch_all_rooms():
+    try:
+        all_rooms = model_routes.Room.query.all()
+
+        rooms = [{
+            'room_id': room.id,
+            'room_number': room.room_number,
+            'room_type': room.room_type,
+            'occupancy': room.occupancy,
+            'is_ac': room.is_ac,
+            'room_price': room.price_per_night,
+            'extra_bed_price': room.extra_bed_price
+        } for room in all_rooms]
+
+        return jsonify({'all_rooms': rooms}), 200
+
+    except Exception as e:
+        print(e)
+        return jsonify({'error': str(e)}), 500
+        
+        
 @guest_bp.route('/api/search_booking', methods=['GET'])
 def search_booking():
     booking_id = request.args.get('bookingId')
