@@ -193,6 +193,71 @@ def check_available_rooms():
         return jsonify({'error': str(e)}), 500
 
 
+@guest_bp.route('/api/available-rooms-modify', methods=['GET'])
+def check_available_rooms_for_modify():
+    try:
+        duration_of_stay = int(request.args.get('durationOfStay'))
+        target_check_in_date = datetime.strptime(
+            request.args.get('checkInDateTime'), '%Y-%m-%dT%H:%M:%S.%fZ'
+        )
+        target_expected_check_out_date = datetime.strptime(
+            request.args.get('probableCheckOutDateTime'), '%Y-%m-%dT%H:%M:%S.%fZ'
+        )
+        exclude_booking_id = request.args.get('excludeBookingId', type=int)
+
+        # Only Checked-In bookings should block rooms
+        active_bookings = model_routes.Booking.query.filter(
+            model_routes.Booking.status.in_(["Confirmed", "Checked-In"])
+        )
+
+        if exclude_booking_id:
+            active_bookings = active_bookings.filter(model_routes.Booking.id != exclude_booking_id)
+
+        active_bookings = active_bookings.all()
+
+        checkedin_rooms = set()  # Fully blocked rooms
+        reserved_rooms_status = {}  # For confirmed rooms marking
+
+        for booking in active_bookings:
+            if (
+                    booking.check_in_date < target_expected_check_out_date and
+                    booking.expected_check_out_date > target_check_in_date
+            ):
+                for room_association in booking.room_associations:
+                    room = room_association.room
+
+                    if booking.status == "Checked-In":
+                        checkedin_rooms.add(room.id)
+                    elif booking.status == "Confirmed":
+                        reserved_rooms_status[room.id] = True
+
+        all_rooms = model_routes.Room.query.all()
+
+        rooms = []
+        for room in all_rooms:
+            # Skip only Checked-In rooms
+            if room.id in checkedin_rooms:
+                continue
+
+            rooms.append({
+                'room_id': room.id,
+                'room_number': room.room_number,
+                'room_type': room.room_type,
+                'occupancy': room.occupancy,
+                'is_ac': room.is_ac,
+                'room_price': room.price_per_night,
+                'extra_bed_price': room.extra_bed_price,
+                'is_reserved': reserved_rooms_status.get(room.id, False)  # Mark reserved
+            })
+
+        return jsonify({'available_rooms': rooms}), 200
+
+    except Exception as e:
+        print(e)
+        return jsonify({'error': str(e)}), 500
+
+
+
 @guest_bp.route('/api/all-rooms', methods=['GET'])
 def fetch_all_rooms():
     try:
