@@ -193,7 +193,6 @@ def check_available_rooms():
         return jsonify({'error': str(e)}), 500
 
 
-
 @guest_bp.route('/api/all-rooms', methods=['GET'])
 def fetch_all_rooms():
     try:
@@ -662,10 +661,14 @@ def check_rooms_status():
 @guest_bp.route('/api/get_payment', methods=['GET'])
 def get_payments_by_date():
     # Parse dates from request
-    start_date = datetime.strptime(request.args.get('startDate'), '%Y-%m-%dT%H:%M:%S.%fZ')
-    end_date = datetime.strptime(request.args.get('endDate'), '%Y-%m-%dT%H:%M:%S.%fZ')
+    # start_date = datetime.strptime(request.args.get('startDate'), '%Y-%m-%dT%H:%M:%S.%fZ')
+    # end_date = datetime.strptime(request.args.get('endDate'), '%Y-%m-%dT%H:%M:%S.%fZ')
 
-    # Adjust to full day boundaries
+    start_date = datetime.strptime(request.args.get('startDate'), '%Y-%m-%dT%H:%M:%S.%fZ').date()
+    end_date = datetime.strptime(request.args.get('endDate'), '%Y-%m-%dT%H:%M:%S.%fZ').date()
+
+
+# Adjust to full day boundaries
     start_of_day = datetime.combine(start_date, datetime.min.time())
     end_of_day = datetime.combine(end_date, datetime.max.time())
 
@@ -679,43 +682,63 @@ def get_payments_by_date():
         .all()
     )
 
-    # --------------------
-    # Paid Payments (aggregated by booking + mode)
-    # --------------------
-    paid_results = (
-        model_routes.db.session.query(
-            model_routes.Booking.id.label('booking_id'),
-            model_routes.Customer.name.label('customer_name'),
-            model_routes.Customer.phone.label('contact_number'),
-            model_routes.Payment.payment_mode.label('payment_mode'),
-            func.sum(model_routes.Payment.payment_amount).label('amount'),
-            func.max(model_routes.Payment.payment_date).label('payment_date'),
-            func.group_concat(model_routes.Room.room_number).label('room_numbers')
-        )
-        .join(model_routes.Customer, model_routes.Booking.customer_id == model_routes.Customer.id)
-        .join(model_routes.Payment, model_routes.Booking.id == model_routes.Payment.booking_id)
-        .join(model_routes.BookingRoom, model_routes.Booking.id == model_routes.BookingRoom.booking_id)
-        .join(model_routes.Room, model_routes.BookingRoom.room_id == model_routes.Room.id)
-        .filter(
-            model_routes.Payment.payment_date.between(start_of_day, end_of_day),
-            model_routes.Payment.payment_status != "Discount"   # <-- added
-            #model_routes.Payment.notes.is_(None)
-        )
-        .group_by(
-            model_routes.Booking.id,
-            model_routes.Customer.name,
-            model_routes.Customer.phone,
-            model_routes.Payment.payment_mode
-        )
+    expenses = (
+        model_routes.Expense.query
+        .filter(model_routes.Expense.date.between(start_date, end_date))
         .all()
     )
 
     # --------------------
+    # Paid Payments (aggregated by booking + mode)
+    # --------------------
+    payment_subq = (
+        model_routes.db.session.query(
+            model_routes.Payment.booking_id.label('booking_id'),
+            model_routes.Payment.payment_mode.label('payment_mode'),
+            func.sum(model_routes.Payment.payment_amount).label('amount'),
+            func.max(model_routes.Payment.payment_date).label('payment_date')
+        )
+        .filter(
+            model_routes.Payment.payment_date.between(start_of_day, end_of_day),
+            model_routes.Payment.payment_status != "Discount"
+        )
+        .group_by(model_routes.Payment.booking_id, model_routes.Payment.payment_mode)
+        .subquery()
+    )
+
+    paid_results = (
+        model_routes.db.session.query(
+            model_routes.Booking.id.label('booking_id'),
+            model_routes.Booking.status.label('booking_status'),
+            model_routes.Customer.name.label('customer_name'),
+            model_routes.Customer.phone.label('contact_number'),
+            payment_subq.c.payment_mode,
+            payment_subq.c.amount,
+            payment_subq.c.payment_date,
+            func.group_concat(model_routes.Room.room_number).label('room_numbers')
+        )
+        .join(model_routes.Customer, model_routes.Booking.customer_id == model_routes.Customer.id)
+        .join(payment_subq, model_routes.Booking.id == payment_subq.c.booking_id)
+        .join(model_routes.BookingRoom, model_routes.Booking.id == model_routes.BookingRoom.booking_id)
+        .join(model_routes.Room, model_routes.BookingRoom.room_id == model_routes.Room.id)
+        .group_by(
+            model_routes.Booking.id,
+            model_routes.Booking.status,
+            model_routes.Customer.name,
+            model_routes.Customer.phone,
+            payment_subq.c.payment_mode
+        )
+        .all()
+    )
+
+
+# --------------------
     # Pending Payments
     # --------------------
     pending_results = (
         model_routes.db.session.query(
             model_routes.Booking.id.label('booking_id'),
+            model_routes.Booking.status.label('booking_status'),  # Added Booking Status
             model_routes.Customer.name.label('customer_name'),
             model_routes.Customer.phone.label('contact_number'),
             model_routes.Payment.payment_mode.label('payment_mode'),
@@ -730,11 +753,10 @@ def get_payments_by_date():
         .filter(
             model_routes.Payment.payment_status == "DUE",
             model_routes.Payment.payment_date <= end_of_day
-            # Optional: restrict to past/current bookings only
-            # model_routes.Booking.check_in_date <= datetime.today()
         )
         .group_by(
             model_routes.Booking.id,
+            model_routes.Booking.status,  # Added for group_by
             model_routes.Customer.name,
             model_routes.Customer.phone,
             model_routes.Payment.payment_mode
@@ -748,6 +770,7 @@ def get_payments_by_date():
     payment_details = [
         {
             "booking_id": row.booking_id,
+            "booking_status": row.booking_status,  # Added
             "customer_name": row.customer_name,
             "contact_number": row.contact_number,
             "payment_mode": row.payment_mode.upper(),
@@ -761,6 +784,7 @@ def get_payments_by_date():
     pending_payment_details = [
         {
             "booking_id": row.booking_id,
+            "booking_status": row.booking_status,  # Added
             "customer_name": row.customer_name,
             "contact_number": row.contact_number,
             "payment_mode": row.payment_mode.upper(),
@@ -781,6 +805,8 @@ def get_payments_by_date():
         for row in expenses
     ]
     print(payment_details)
+    print("---------")
+    print(expense_details)
     return jsonify({
         "payment_details": payment_details,
         "pending_payment_details": pending_payment_details,
@@ -1020,6 +1046,8 @@ def daily_chart():
                 "current_guest_phone": None,
                 "next_guest_name": None,
                 "next_guest_phone": None,
+                "next_check_in_time": None,
+                "current_check_out_time": None,
             }
 
             # Holder variables
@@ -1107,6 +1135,9 @@ def daily_chart():
                 resp["current_guest_phone"] = cur_phone
                 resp["next_guest_name"] = nxt_name
                 resp["next_guest_phone"] = nxt_phone
+                resp["current_check_out_time"] = checkout_today_booking.expected_check_out_date
+                resp["next_check_in_time"] = new_booking_today.check_in_date
+
 
             # 3) current spanning booking
             elif current_booking:
@@ -1124,6 +1155,7 @@ def daily_chart():
                 gm, ph = guest_info_from_booking(new_booking_today)
                 resp["guest_name"] = gm
                 resp["phone"] = ph
+                resp["next_check_in_time"] = new_booking_today.check_in_date
 
             # 5) checkout today and no new booking
             elif checkout_today_booking:
@@ -1131,6 +1163,7 @@ def daily_chart():
                 gm, ph = guest_info_from_booking(checkout_today_booking)
                 resp["guest_name"] = gm
                 resp["phone"] = ph
+                resp["current_check_out_time"] = checkout_today_booking.expected_check_out_date
 
             else:
                 resp["status"] = "available"
@@ -1146,3 +1179,29 @@ def daily_chart():
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+@guest_bp.route('/api/add_expense', methods=['POST'])
+def add_expense():
+    data = request.get_json()
+    date = datetime.strptime(data['date'], '%Y-%m-%d')
+    description = data['description']
+    amount = data['amount']
+    mode = data['mode']
+
+    existing_expense = model_routes.Expense.query.filter_by(date=date, description=description).first()
+    print(existing_expense)
+    if existing_expense:
+        print("Expense already exists for this date and description.")
+        return jsonify({'message': 'Expense Record already Inserted'}), 201
+    expense = model_routes.Expense(
+        date=date,
+        description=description,
+        amount=amount,
+        mode=mode
+    )
+
+    model_routes.db.session.add(expense)
+    model_routes.db.session.commit()
+
+    return jsonify({'message': 'New Expense Record created successfully'}), 201
