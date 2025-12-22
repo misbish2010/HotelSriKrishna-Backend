@@ -137,7 +137,7 @@ def create_booking():
                 payment_amount=amount,
                 payment_date=payment_date or datetime.utcnow(),
                 payment_mode=p.get("mode", ""),
-                payment_status=p.get("status", "paid"),
+                payment_status=p.get("status", "Paid"),
                 notes=p.get("notes", "")
             )
             model_routes.db.session.add(payment)
@@ -373,6 +373,7 @@ def search_booking():
                 'status': p.payment_status
             }
             for p in booking.payments
+            if p.payment_amount and p.payment_amount != 0
         ],
         'room_details': [
             {
@@ -471,24 +472,32 @@ def update_booking():
             # Clear existing
             model_routes.Payment.query.filter_by(booking_id=booking.id).delete()
             for p in payments:
+                amount = p.get('amount', 0)
+
+                # ❌ Skip zero-amount payments
+                if not amount or float(amount) == 0:
+                    continue
                 payment_date = p.get('date')
                 if isinstance(payment_date, str):
                     try:
                         payment_date = datetime.strptime(payment_date, "%Y-%m-%d")
                     except ValueError:
                         payment_date = datetime.utcnow()
+
+                status = (p.get('status') or '').strip() or 'Paid'
                 payment = model_routes.Payment(
                     booking_id=booking.id,
                     payment_amount=p.get('amount', 0),
                     payment_date=payment_date or datetime.utcnow(),
                     payment_mode=p.get('mode'),
                     notes=p.get('notes', ''),
-                    payment_status=p.get('status', 'paid')
+                    payment_status=status
                 )
                 model_routes.db.session.add(payment)
 
         model_routes.db.session.commit()
         return jsonify({"success": True, "message": "Booking updated successfully"})
+
 
     except Exception as e:
         model_routes.db.session.rollback()
@@ -605,7 +614,7 @@ def check_rooms_dashboard():
                         'status': p.payment_status
                     }
                     for p in booking.payments
-                    if p.payment_status != "applied" or p.payment_status != "Discount"
+                    if p.payment_status != "Discount"
                 ],
                 'room_details': [
                     {
@@ -753,13 +762,6 @@ def get_payments_by_date():
     # --------------------
     # Expenses
     # --------------------
-    # expenses = (
-    #     model_routes.Expense.query
-    #     .filter(model_routes.Expense.date >= start_of_day,
-    #             model_routes.Expense.date <= end_of_day)
-    #     .all()
-    # )
-
     expenses = (
         model_routes.Expense.query
         .filter(model_routes.Expense.date.between(start_date, end_date))
@@ -778,8 +780,8 @@ def get_payments_by_date():
         )
         .filter(
             model_routes.Payment.payment_date.between(start_of_day, end_of_day),
-            model_routes.Payment.payment_status != "Discount",
-            model_routes.Payment.notes != "Pending"
+            ~func.lower(model_routes.Payment.payment_status).in_(["Discount", "Pending"]),
+            ~func.lower(model_routes.Payment.notes).in_(["Pending"])
         )
         .group_by(model_routes.Payment.booking_id, model_routes.Payment.payment_mode)
         .subquery()
@@ -866,9 +868,6 @@ def get_payments_by_date():
             if booking.expected_check_out_date else today
         )
 
-        nights = max((effective_end_date - check_in_date).days + 1, 1)
-
-        charge_till_today = (booking.total_price / booking.duration_of_stay) * nights
         total_paid = (
             model_routes.db.session.query(
                 func.coalesce(func.sum(model_routes.Payment.payment_amount), 0)
@@ -880,8 +879,37 @@ def get_payments_by_date():
             )
             .scalar()
         )
+        checkin_start = datetime.combine(
+            booking.check_in_date,
+            datetime.min.time()
+        )
 
-        pending_amount = charge_till_today - total_paid
+        advance_paid = (
+            model_routes.db.session.query(
+                func.coalesce(func.sum(model_routes.Payment.payment_amount), 0)
+            )
+            .filter(
+                model_routes.Payment.booking_id == booking.id,
+                func.lower(model_routes.Payment.payment_status) == "paid",
+                model_routes.Payment.payment_date < checkin_start
+            )
+            .scalar()
+        )
+        agreed_price_per_night = (
+            model_routes.db.session.query(
+                func.coalesce(func.sum(model_routes.BookingRoom.final_price_per_night), 0)
+            )
+            .filter(
+                model_routes.BookingRoom.booking_id == booking.id
+            )
+            .scalar()
+        )
+        nights = max((effective_end_date - check_in_date).days + 1, 1)
+        calculated_charge_till_today = agreed_price_per_night * nights
+
+        #charge_till_today = (booking.total_price / booking.duration_of_stay) * nights
+
+        pending_amount = calculated_charge_till_today - total_paid
 
         if pending_amount > 0:
             pending_payment_details.append({
@@ -890,22 +918,54 @@ def get_payments_by_date():
                 "check_in_date": booking.check_in_date,
                 "customer_name": row.customer_name,
                 "contact_number": row.contact_number,
-                "amount": pending_amount,
+                "net_pending_amount": round(pending_amount,2),
+                "advance_paid": round(advance_paid, 2),
+                "agreed_price_per_night": round(agreed_price_per_night, 2),
                 "room_numbers": row.room_numbers.split(",")
             })
-    for row in checked_out_pending:
-        print (row)
-        if abs(row.pending_amount) > 0:   # use correct attribute
-            pending_payment_details.append({
-                "booking_id": row.booking_id,
-                "booking_status": row.booking_status,
-                "check_in_date": row.check_in_date,
-                "customer_name": row.customer_name,
-                "contact_number": row.contact_number,
-                "amount": abs(row.pending_amount),
-                "note": "Pending",
-                "room_numbers": row.room_numbers.split(",")
-            })
+        for row in checked_out_pending:
+            booking = model_routes.Booking.query.get(row.booking_id)
+
+            checkin_start = datetime.combine(
+                booking.check_in_date,
+                datetime.min.time()
+            )
+
+            advance_paid = (
+                model_routes.db.session.query(
+                    func.coalesce(func.sum(model_routes.Payment.payment_amount), 0)
+                )
+                .filter(
+                    model_routes.Payment.booking_id == booking.id,
+                    func.lower(model_routes.Payment.payment_status) == "paid",
+                    model_routes.Payment.payment_date < checkin_start
+                )
+                .scalar()
+            )
+
+            agreed_price_per_night = (
+                model_routes.db.session.query(
+                    func.coalesce(func.sum(model_routes.BookingRoom.final_price_per_night), 0)
+                )
+                .filter(
+                    model_routes.BookingRoom.booking_id == booking.id
+                )
+                .scalar()
+            )
+
+            if abs(row.pending_amount) > 0:
+                pending_payment_details.append({
+                    "booking_id": row.booking_id,
+                    "booking_status": row.booking_status,
+                    "check_in_date": row.check_in_date,
+                    "customer_name": row.customer_name,
+                    "contact_number": row.contact_number,
+                    "net_pending_amount": abs(row.pending_amount),
+                    "advance_paid": round(advance_paid, 2),
+                    "agreed_price_per_night": round(agreed_price_per_night, 2),
+                    "note": "Pending",
+                    "room_numbers": row.room_numbers.split(",")
+                })
 
     # --------------------
     # Format for JSON
@@ -939,13 +999,13 @@ def get_payments_by_date():
     # --------------------
     adjusted_payment_details = []
 
-    RECEIVED_STATUSES = ["paid", "completed"]
+    RECEIVED_STATUSES = ["Paid"]
 
     all_bookings_with_payments = (
         model_routes.db.session.query(model_routes.Booking)
         .join(model_routes.Payment)
         .filter(
-            model_routes.Payment.payment_status.in_(RECEIVED_STATUSES),
+            func.lower(model_routes.Payment.payment_status).in_(["Paid"]),
             model_routes.Payment.payment_date >= start_of_day,
             model_routes.Payment.payment_date <= end_of_day,
             model_routes.Booking.status.in_(["Checked-In", "Checked-Out"])
@@ -966,7 +1026,7 @@ def get_payments_by_date():
             model_routes.db.session.query(model_routes.Payment)
             .filter(
                 model_routes.Payment.booking_id == booking.id,
-                model_routes.Payment.payment_status.in_(RECEIVED_STATUSES),
+                func.lower(model_routes.Payment.payment_status).in_(["Paid"]),
                 model_routes.Payment.payment_date < checkin_start
             )
             .order_by(model_routes.Payment.payment_date.asc())
@@ -978,6 +1038,8 @@ def get_payments_by_date():
             for pay in advance_payments
             if pay.payment_amount > 0
         ]
+        print(advance_payments)
+        print(advance_paid_dates)
 
         total_advance_before_checkin = sum(
             p.payment_amount for p in advance_payments if p.payment_amount > 0
@@ -985,14 +1047,17 @@ def get_payments_by_date():
 
         # 2️⃣ Payments up to today
         total_paid_upto_today = (
-                model_routes.db.session.query(func.sum(model_routes.Payment.payment_amount))
-                .filter(
-                    model_routes.Payment.booking_id == booking.id,
-                    model_routes.Payment.payment_status.in_(RECEIVED_STATUSES),
-                    model_routes.Payment.payment_date <= end_of_day
-                )
-                .scalar() or 0
+            model_routes.db.session.query(
+                func.coalesce(func.abs(func.sum(model_routes.Payment.payment_amount)), 0)
+            )
+            .filter(
+                model_routes.Payment.booking_id == booking.id,
+                func.lower(model_routes.Payment.payment_status).in_(["Paid", "Discount"]),
+                model_routes.Payment.payment_date <= end_of_day
+            )
+            .scalar()
         )
+
 
         # 3️⃣ Detect full adjustment today
         if (
@@ -1005,7 +1070,7 @@ def get_payments_by_date():
                 model_routes.db.session.query(model_routes.Payment)
                 .filter(
                     model_routes.Payment.booking_id == booking.id,
-                    model_routes.Payment.payment_status.in_(RECEIVED_STATUSES),
+                    func.lower(model_routes.Payment.payment_status).in_(RECEIVED_STATUSES),
                     model_routes.Payment.payment_date <= end_of_day
                 )
                 .order_by(model_routes.Payment.payment_date.desc())
@@ -1024,7 +1089,7 @@ def get_payments_by_date():
                         br.room.room_number for br in booking.room_associations
                     ]
                 })
-
+    print(pending_payment_details)
     return jsonify({
         "payment_details": payment_details,
         "pending_payment_details": pending_payment_details,
@@ -1157,10 +1222,14 @@ def daily_chart():
       - date=YYYY-MM-DD  (required)
 
     Returns:
-      { date: "YYYY-MM-DD", rooms: [ { room_number, status, guest_name, phone, current_guest_name, current_guest_phone, next_guest_name, next_guest_phone } ] }
-    Statuses: available, checked_in, new_booking, continue_checked_in, continue_confirmed, checkout_to_new_booking, checkout_available
-    """
+      { date: "YYYY-MM-DD", rooms: [ { room_number, status, guest_name, phone,
+        current_guest_name, current_guest_phone, next_guest_name, next_guest_phone } ] }
 
+    Statuses:
+      available, checked_in, new_booking,
+      continue_checked_in, continue_confirmed,
+      checkout_to_new_booking, checkout_available
+    """
     try:
         date_str = request.args.get("date")
         if not date_str:
@@ -1182,53 +1251,43 @@ def daily_chart():
         all_rooms = Room.query.order_by(Room.room_number.asc()).all()
         unique_rooms_by_number = {}
         for r in all_rooms:
-            if r.room_number not in unique_rooms_by_number:
-                unique_rooms_by_number[r.room_number] = r
-        rooms_list = list(unique_rooms_by_number.values())
+            unique_rooms_by_number.setdefault(r.room_number, []).append(r)
 
         # ---------------------------------------------------------
-        # Query BookingRoom rows for bookings that overlap the target date
-        # Condition (date-only):
-        #   check_in_date <= target_date
-        # AND
-        #   ( expected_check_out_date is NULL OR expected_check_out_date >= target_date )
-        # AND status in (Confirmed, Checked-In)
+        # Query overlapping bookings
         # ---------------------------------------------------------
         overlapping_br_rows = (
             db.session.query(BookingRoom)
             .join(Booking, BookingRoom.booking_id == Booking.id)
-            .options(
-                joinedload(BookingRoom.booking).joinedload(Booking.customer)
-            )
+            .options(joinedload(BookingRoom.booking).joinedload(Booking.customer))
             .filter(
-                Booking.status.in_(["Confirmed", "Checked-In"]),
+                Booking.status.in_(["Confirmed", "Checked-In", "Checked-Out"]),
+                Booking.check_in_date != None,
                 func.date(Booking.check_in_date) <= target_date,
                 or_(
                     Booking.expected_check_out_date == None,
-                    func.date(Booking.expected_check_out_date) >= target_date,
+                    func.date(Booking.expected_check_out_date) > target_date,
                     ),
                 )
             .all()
         )
 
-        # Map room_id -> list of bookings (overlapping)
         overlapping_by_room = {}
         for br in overlapping_br_rows:
             overlapping_by_room.setdefault(br.room_id, []).append(br.booking)
 
-        # Also fetch bookings that START exactly on target_date (to ensure we catch new bookings)
+        # Bookings starting today (defensive – keep existing behavior)
         starting_today_br_rows = (
             db.session.query(BookingRoom)
             .join(Booking, BookingRoom.booking_id == Booking.id)
-            .options(
-                joinedload(BookingRoom.booking).joinedload(Booking.customer)
-            )
+            .options(joinedload(BookingRoom.booking).joinedload(Booking.customer))
             .filter(
                 Booking.status.in_(["Confirmed", "Checked-In"]),
                 func.date(Booking.check_in_date) == target_date
             )
             .all()
         )
+
         starting_today_by_room = {}
         for br in starting_today_br_rows:
             starting_today_by_room.setdefault(br.room_id, []).append(br.booking)
@@ -1236,26 +1295,23 @@ def daily_chart():
         rooms_resp = []
 
         # ---------------------------------------------------------
-        # For each unique room_number, gather bookings from all variant room ids
+        # Per room_number evaluation
         # ---------------------------------------------------------
-        for room in rooms_list:
-            # all DB ids that share this room_number
-            variant_ids = [r.id for r in all_rooms if r.room_number == room.room_number]
+        for room_number, room_variants in unique_rooms_by_number.items():
+            variant_ids = [r.id for r in room_variants]
 
-            # gather overlapping bookings and starting-today bookings across variants
             overlapping_bookings = []
             starting_today_bookings = []
             for rid in variant_ids:
                 overlapping_bookings.extend(overlapping_by_room.get(rid, []))
                 starting_today_bookings.extend(starting_today_by_room.get(rid, []))
 
-            # dedupe bookings by id (same booking might be linked to multiple variants)
+            # dedupe
             overlapping_bookings = list({b.id: b for b in overlapping_bookings}.values())
             starting_today_bookings = list({b.id: b for b in starting_today_bookings}.values())
 
-            # Initialize response object
             resp = {
-                "room_number": room.room_number,
+                "room_number": room_number,
                 "status": "available",
                 "guest_name": None,
                 "phone": None,
@@ -1267,62 +1323,64 @@ def daily_chart():
                 "current_check_out_time": None,
             }
 
-            # Holder variables
-            # booking that covers the day (strict: checkin < target_date < checkout)
             current_booking = None
-            # booking that has check_in == target_date and status == Checked-In
             checked_in_today_booking = None
-            # booking that has check_in == target_date and status == Confirmed
             new_booking_today = None
-            # booking whose checkout (expected or computed) == target_date
             checkout_today_booking = None
             active_bookings = []
 
-
-            # Evaluate overlapping bookings
+            # ---------------------------------------------------------
+            # Evaluate bookings
+            # ---------------------------------------------------------
             for b in overlapping_bookings:
                 b_checkin = _date_only(b.check_in_date)
                 b_checkout = _date_only(b.expected_check_out_date)
-                if booking_active_on_date(b, target_date):
-                    active_bookings.append(b)
-                if b_checkout is None:
-                    # compute checkout from duration_of_stay if available
-                    if getattr(b, "duration_of_stay", None) is not None:
-                        b_checkout = (b.check_in_date + timedelta(days=b.duration_of_stay)).date()
-                    else:
-                        b_checkout = None
+                if b_checkout is None and getattr(b, "duration_of_stay", None) is not None:
+                    b_checkout = (b.check_in_date + timedelta(days=b.duration_of_stay)).date()
 
+                is_same_day = (b_checkin == target_date and b_checkout == target_date)
                 status_norm = (b.status or "").strip().lower()
 
-                # starts today?
+                if (
+                        status_norm == "checked-out"
+                        and b_checkout
+                        and b_checkout > target_date
+                ):
+                    # Treat as checked-in for chart purposes
+                    status_norm = "checked-in"
+
+                # active booking (exclude same-day to avoid conflict inflation)
+                if booking_active_on_date(b, target_date) and not is_same_day:
+                    active_bookings.append(b)
+
+                # SAME-DAY check-in & checkout
+                if is_same_day:
+                    checked_in_today_booking = checked_in_today_booking or b
+                    checkout_today_booking = checkout_today_booking or b
+                    continue
+
+                # starts today
                 if b_checkin == target_date:
                     if status_norm == "checked-in":
                         checked_in_today_booking = checked_in_today_booking or b
                     elif status_norm == "confirmed":
-                        # if multiple new bookings today, pick earliest check_in datetime (if needed)
-                        if not new_booking_today:
-                            new_booking_today = b
-                        else:
-                            if getattr(b, "check_in_date", None) and getattr(new_booking_today, "check_in_date", None):
-                                if b.check_in_date < new_booking_today.check_in_date:
-                                    new_booking_today = b
+                        new_booking_today = new_booking_today or b
 
-                # ends today?
+                # ends today
                 if b_checkout == target_date:
-                    # pick any (or the one with latest checkout if multiple) — keep first
                     checkout_today_booking = checkout_today_booking or b
 
-                # covers the day? **STRICT**: checkin < target_date < checkout
-                if b_checkin is not None and b_checkout is not None:
-                    if (b_checkin < target_date) and (b_checkout > target_date):
-                        # Prefer Checked-In bookings over Confirmed when selecting current_booking
-                        if not current_booking:
-                            current_booking = b
-                        else:
-                            if (current_booking.status or "").strip().lower() != "checked-in" and status_norm == "checked-in":
-                                current_booking = b
+                # spans day (strict)
+                if b_checkin < target_date and b_checkout and b_checkout > target_date:
+                    if not current_booking:
+                        current_booking = b
+                    elif (
+                            (current_booking.status or "").lower() != "checked-in"
+                            and status_norm == "checked-in"
+                    ):
+                        current_booking = b
 
-            # Also include bookings that were explicitly found in starting_today query (defensive)
+            # defensive starting-today
             for b in starting_today_bookings:
                 status_norm = (b.status or "").strip().lower()
                 if status_norm == "checked-in":
@@ -1330,68 +1388,59 @@ def daily_chart():
                 elif status_norm == "confirmed":
                     new_booking_today = new_booking_today or b
 
-            # -------------------------
-            # Decision priority (executed exactly in this order):
-            # 1) If someone checked-in today -> "checked_in"
-            # 2) If checkout today AND there is a new booking today (different booking) -> "checkout_to_new_booking"
-            # 3) If current_booking spanning day -> continue_checked_in OR continue_confirmed
-            # 4) If new_booking_today (confirmed) -> "new_booking"
-            # 5) If checkout_today_booking exists -> "checkout_available"
-            # 6) else available
-            # -------------------------
+            # ---------------------------------------------------------
+            # Decision priority (CRITICAL)
+            # ---------------------------------------------------------
 
-            # 1) checked_in today
-            if checked_in_today_booking:
-                resp["status"] = "checked_in"
-                gm, ph = guest_info_from_booking(checked_in_today_booking)
-                resp["guest_name"] = gm
-                resp["phone"] = ph
-
-            # 2) checkout today and new booking today (different bookings)
-            elif checkout_today_booking and new_booking_today and checkout_today_booking.id != new_booking_today.id:
+            # 1) checkout → new booking (same day)
+            if (
+                    checkout_today_booking
+                    and new_booking_today
+                    and checkout_today_booking.id != new_booking_today.id
+            ):
                 resp["status"] = "checkout_to_new_booking"
-                cur_name, cur_phone = guest_info_from_booking(checkout_today_booking)
-                nxt_name, nxt_phone = guest_info_from_booking(new_booking_today)
-                resp["current_guest_name"] = cur_name
-                resp["current_guest_phone"] = cur_phone
-                resp["next_guest_name"] = nxt_name
-                resp["next_guest_phone"] = nxt_phone
-                resp["current_check_out_time"] = checkout_today_booking.expected_check_out_date
-                resp["next_check_in_time"] = new_booking_today.check_in_date
+                cur = checkout_today_booking
+                nxt = new_booking_today
+                resp["current_guest_name"], resp["current_guest_phone"] = guest_info_from_booking(cur)
+                resp["next_guest_name"], resp["next_guest_phone"] = guest_info_from_booking(nxt)
+                resp["current_check_out_time"] = cur.expected_check_out_date
+                resp["next_check_in_time"] = nxt.check_in_date
 
+            # 2) checked-in today (includes same-day)
+            elif checked_in_today_booking:
+                resp["status"] = "checked_in"
+                b = checked_in_today_booking
+                resp["guest_name"], resp["phone"] = guest_info_from_booking(b)
+                if checkout_today_booking and checkout_today_booking.id == b.id:
+                    resp["current_check_out_time"] = b.expected_check_out_date
 
-            # 3) current spanning booking
+            # 3) spanning booking
             elif current_booking:
-                if (current_booking.status or "").strip().lower() == "checked-in":
-                    resp["status"] = "continue_checked_in"
-                else:
-                    resp["status"] = "continue_confirmed"
-                gm, ph = guest_info_from_booking(current_booking)
-                resp["guest_name"] = gm
-                resp["phone"] = ph
+                resp["status"] = (
+                    "continue_checked_in"
+                    if (current_booking.status or "").lower() == "checked-in"
+                    else "continue_confirmed"
+                )
+                resp["guest_name"], resp["phone"] = guest_info_from_booking(current_booking)
 
-            # 4) new booking today (confirmed, not checked-in)
+            # 4) new booking today
             elif new_booking_today:
                 resp["status"] = "new_booking"
-                gm, ph = guest_info_from_booking(new_booking_today)
-                resp["guest_name"] = gm
-                resp["phone"] = ph
+                resp["guest_name"], resp["phone"] = guest_info_from_booking(new_booking_today)
                 resp["next_check_in_time"] = new_booking_today.check_in_date
 
-            # 5) checkout today and no new booking
-            elif checkout_today_booking:
+            # 5) checkout only → available
+            elif checkout_today_booking and not checked_in_today_booking:
                 resp["status"] = "checkout_available"
-                gm, ph = guest_info_from_booking(checkout_today_booking)
-                resp["guest_name"] = gm
-                resp["phone"] = ph
+                resp["guest_name"], resp["phone"] = guest_info_from_booking(checkout_today_booking)
                 resp["current_check_out_time"] = checkout_today_booking.expected_check_out_date
 
             else:
                 resp["status"] = "available"
 
-            # -------------------------
+            # ---------------------------------------------------------
             # Conflict detection
-            # -------------------------
+            # ---------------------------------------------------------
             if len(active_bookings) > 1:
                 resp["conflict"] = True
                 resp["conflict_bookings"] = [
@@ -1411,15 +1460,14 @@ def daily_chart():
 
             rooms_resp.append(resp)
 
-        # stable ordering
-        rooms_resp = sorted(rooms_resp, key=lambda x: str(x["room_number"]))
-
+        rooms_resp.sort(key=lambda x: str(x["room_number"]))
         return jsonify({"date": target_date.strftime("%Y-%m-%d"), "rooms": rooms_resp}), 200
 
     except Exception as e:
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
 
 
 @guest_bp.route('/api/add_expense', methods=['POST'])
