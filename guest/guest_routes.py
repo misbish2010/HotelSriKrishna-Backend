@@ -1275,7 +1275,7 @@ def daily_chart():
                 func.date(Booking.check_in_date) <= target_date,
                 or_(
                     Booking.expected_check_out_date == None,
-                    func.date(Booking.expected_check_out_date) > target_date,
+                    func.date(Booking.expected_check_out_date) >= target_date,
                     ),
                 )
             .all()
