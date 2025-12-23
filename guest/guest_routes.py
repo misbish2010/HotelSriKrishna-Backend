@@ -2,9 +2,11 @@ from flask import Blueprint, request, jsonify
 from model import model_routes
 import phonenumbers
 from flask import request, jsonify
-from datetime import datetime,timedelta
+from datetime import datetime,timedelta,timezone
 from sqlalchemy import func, and_, or_, cast, Date
 from sqlalchemy.orm import joinedload
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 # Defining a blueprint
@@ -487,7 +489,7 @@ def update_booking():
                 status = (p.get('status') or '').strip() or 'Paid'
                 payment = model_routes.Payment(
                     booking_id=booking.id,
-                    payment_amount=p.get('amount', 0),
+                    payment_amount=abs(amount),
                     payment_date=payment_date or datetime.utcnow(),
                     payment_mode=p.get('mode'),
                     notes=p.get('notes', ''),
@@ -748,18 +750,29 @@ def check_rooms_status():
 @guest_bp.route('/api/get_payment', methods=['GET'])
 def get_payments_by_date():
     # Parse dates from request
-    # start_date = datetime.strptime(request.args.get('startDate'), '%Y-%m-%dT%H:%M:%S.%fZ')
-    # end_date = datetime.strptime(request.args.get('endDate'), '%Y-%m-%dT%H:%M:%S.%fZ')
+    # Parse incoming UTC datetimes
+    start_dt_utc = datetime.strptime(
+        request.args.get('startDate'),
+        '%Y-%m-%dT%H:%M:%S.%fZ'
+    ).replace(tzinfo=timezone.utc)
 
-    start_date = datetime.strptime(request.args.get('startDate'), '%Y-%m-%dT%H:%M:%S.%fZ').date()
-    end_date = datetime.strptime(request.args.get('endDate'), '%Y-%m-%dT%H:%M:%S.%fZ').date()
+    end_dt_utc = datetime.strptime(
+        request.args.get('endDate'),
+        '%Y-%m-%dT%H:%M:%S.%fZ'
+    ).replace(tzinfo=timezone.utc)
 
+    # Convert to IST
+    start_dt_ist = start_dt_utc.astimezone(IST)
+    end_dt_ist = end_dt_utc.astimezone(IST)
 
-# Adjust to full day boundaries
+    # Extract dates (IST-correct)
+    start_date = start_dt_ist.date()
+    end_date = end_dt_ist.date()
+
+    # Full-day boundaries (IST, stored as naive)
     start_of_day = datetime.combine(start_date, datetime.min.time())
     end_of_day = datetime.combine(end_date, datetime.max.time())
 
-    # --------------------
     # Expenses
     # --------------------
     expenses = (
@@ -780,7 +793,7 @@ def get_payments_by_date():
         )
         .filter(
             model_routes.Payment.payment_date.between(start_of_day, end_of_day),
-            ~func.lower(model_routes.Payment.payment_status).in_(["Discount", "Pending"]),
+            ~func.lower(model_routes.Payment.payment_status).in_(["discount", "pending"]),
             ~func.lower(model_routes.Payment.notes).in_(["Pending"])
         )
         .group_by(model_routes.Payment.booking_id, model_routes.Payment.payment_mode)
@@ -813,8 +826,7 @@ def get_payments_by_date():
         .all()
     )
 
-
-# --------------------
+    # --------------------
     # Pending Payments
     # --------------------
     checked_in_bookings = (
@@ -859,7 +871,6 @@ def get_payments_by_date():
 
     for row in checked_in_bookings:
         booking = row.Booking
-
         check_in_date = booking.check_in_date.date()
 
         effective_end_date = min(
@@ -874,7 +885,8 @@ def get_payments_by_date():
             )
             .filter(
                 model_routes.Payment.booking_id == booking.id,
-                model_routes.Payment.payment_status != "Discount",
+                #model_routes.Payment.payment_status != "Discount",
+                func.lower(model_routes.Payment.payment_status) != "discount",
                 model_routes.Payment.payment_date <= end_of_day
             )
             .scalar()
@@ -905,11 +917,8 @@ def get_payments_by_date():
             .scalar()
         )
         nights = max((effective_end_date - check_in_date).days + 1, 1)
-        calculated_charge_till_today = agreed_price_per_night * nights
-
-        #charge_till_today = (booking.total_price / booking.duration_of_stay) * nights
-
-        pending_amount = calculated_charge_till_today - total_paid
+        calculated_charge = agreed_price_per_night * nights
+        pending_amount = calculated_charge - total_paid
 
         if pending_amount > 0:
             pending_payment_details.append({
@@ -923,49 +932,49 @@ def get_payments_by_date():
                 "agreed_price_per_night": round(agreed_price_per_night, 2),
                 "room_numbers": row.room_numbers.split(",")
             })
-        for row in checked_out_pending:
-            booking = model_routes.Booking.query.get(row.booking_id)
+    for row in checked_out_pending:
+        booking = model_routes.Booking.query.get(row.booking_id)
 
-            checkin_start = datetime.combine(
-                booking.check_in_date,
-                datetime.min.time()
+        checkin_start = datetime.combine(
+            booking.check_in_date,
+            datetime.min.time()
+        )
+
+        advance_paid = (
+            model_routes.db.session.query(
+                func.coalesce(func.sum(model_routes.Payment.payment_amount), 0)
             )
-
-            advance_paid = (
-                model_routes.db.session.query(
-                    func.coalesce(func.sum(model_routes.Payment.payment_amount), 0)
-                )
-                .filter(
-                    model_routes.Payment.booking_id == booking.id,
-                    func.lower(model_routes.Payment.payment_status) == "paid",
-                    model_routes.Payment.payment_date < checkin_start
-                )
-                .scalar()
+            .filter(
+                model_routes.Payment.booking_id == booking.id,
+                func.lower(model_routes.Payment.payment_status) == "paid",
+                model_routes.Payment.payment_date < checkin_start
             )
+            .scalar()
+        )
 
-            agreed_price_per_night = (
-                model_routes.db.session.query(
-                    func.coalesce(func.sum(model_routes.BookingRoom.final_price_per_night), 0)
-                )
-                .filter(
-                    model_routes.BookingRoom.booking_id == booking.id
-                )
-                .scalar()
+        agreed_price_per_night = (
+            model_routes.db.session.query(
+                func.coalesce(func.sum(model_routes.BookingRoom.final_price_per_night), 0)
             )
+            .filter(
+                model_routes.BookingRoom.booking_id == booking.id
+            )
+            .scalar()
+        )
 
-            if abs(row.pending_amount) > 0:
-                pending_payment_details.append({
-                    "booking_id": row.booking_id,
-                    "booking_status": row.booking_status,
-                    "check_in_date": row.check_in_date,
-                    "customer_name": row.customer_name,
-                    "contact_number": row.contact_number,
-                    "net_pending_amount": abs(row.pending_amount),
-                    "advance_paid": round(advance_paid, 2),
-                    "agreed_price_per_night": round(agreed_price_per_night, 2),
-                    "note": "Pending",
-                    "room_numbers": row.room_numbers.split(",")
-                })
+        if abs(row.pending_amount) > 0:
+            pending_payment_details.append({
+                "booking_id": row.booking_id,
+                "booking_status": row.booking_status,
+                "check_in_date": row.check_in_date,
+                "customer_name": row.customer_name,
+                "contact_number": row.contact_number,
+                "net_pending_amount": abs(row.pending_amount),
+                "advance_paid": round(advance_paid, 2),
+                "agreed_price_per_night": round(agreed_price_per_night, 2),
+                "note": "Pending",
+                "room_numbers": row.room_numbers.split(",")
+            })
 
     # --------------------
     # Format for JSON
@@ -999,13 +1008,11 @@ def get_payments_by_date():
     # --------------------
     adjusted_payment_details = []
 
-    RECEIVED_STATUSES = ["Paid"]
-
     all_bookings_with_payments = (
         model_routes.db.session.query(model_routes.Booking)
         .join(model_routes.Payment)
         .filter(
-            func.lower(model_routes.Payment.payment_status).in_(["Paid"]),
+            func.lower(model_routes.Payment.payment_status).in_(["paid"]),
             model_routes.Payment.payment_date >= start_of_day,
             model_routes.Payment.payment_date <= end_of_day,
             model_routes.Booking.status.in_(["Checked-In", "Checked-Out"])
@@ -1013,6 +1020,8 @@ def get_payments_by_date():
         .distinct()
         .all()
     )
+    print("****************************")
+    print(all_bookings_with_payments)
 
     for booking in all_bookings_with_payments:
 
@@ -1026,13 +1035,12 @@ def get_payments_by_date():
             model_routes.db.session.query(model_routes.Payment)
             .filter(
                 model_routes.Payment.booking_id == booking.id,
-                func.lower(model_routes.Payment.payment_status).in_(["Paid"]),
+                func.lower(model_routes.Payment.payment_status).in_(["paid"]),
                 model_routes.Payment.payment_date < checkin_start
             )
             .order_by(model_routes.Payment.payment_date.asc())
             .all()
         )
-
         advance_paid_dates = [
             pay.payment_date.strftime("%Y-%m-%d")
             for pay in advance_payments
@@ -1052,11 +1060,13 @@ def get_payments_by_date():
             )
             .filter(
                 model_routes.Payment.booking_id == booking.id,
-                func.lower(model_routes.Payment.payment_status).in_(["Paid", "Discount"]),
+                func.lower(model_routes.Payment.payment_status).in_(["paid", "discount"]),
                 model_routes.Payment.payment_date <= end_of_day
             )
             .scalar()
         )
+        print(total_advance_before_checkin)
+        print(total_paid_upto_today)
 
 
         # 3️⃣ Detect full adjustment today
@@ -1065,12 +1075,11 @@ def get_payments_by_date():
                 total_advance_before_checkin < booking.total_price and
                 total_paid_upto_today >= booking.total_price
         ):
-            print ("====================")
             final_payment = (
                 model_routes.db.session.query(model_routes.Payment)
                 .filter(
                     model_routes.Payment.booking_id == booking.id,
-                    func.lower(model_routes.Payment.payment_status).in_(RECEIVED_STATUSES),
+                    func.lower(model_routes.Payment.payment_status).in_(["paid"]),
                     model_routes.Payment.payment_date <= end_of_day
                 )
                 .order_by(model_routes.Payment.payment_date.desc())

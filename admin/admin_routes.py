@@ -41,6 +41,28 @@ def signup_user():
     return jsonify({'message': 'User created successfully'}), 201
 
 
+@admin_bp.route('/api/update_user_password', methods=['POST'])
+def update_user_password():
+    data = request.get_json()
+
+    username = data.get('username')
+    new_password = data.get('newPassword')
+
+    if not username or not new_password:
+        return jsonify({'error': 'Username and new password are required'}), 400
+
+    user = model_routes.User.query.filter_by(username=username).first()
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+
+    hashed_password = generate_password_hash(new_password).decode('utf-8')
+    user.password = hashed_password
+
+    model_routes.db.session.commit()
+
+    return jsonify({'message': 'Password updated successfully'}), 200
+
+
 @admin_bp.route('/api/register_staff', methods=['POST'])
 @admin_required
 def register_staff():
@@ -95,6 +117,19 @@ def register_room():
 @admin_required
 def register_room_():
     rooms = [
+        {"room_number": "000", "occupancy": "Single", "room_type": "Luxury", "is_ac": False, "price_per_night": 00.0,
+         "extra_bed_price": 300.0},
+        {"room_number": "000", "occupancy": "Double", "room_type": "Studio", "is_ac": False, "price_per_night": 00.0,
+         "extra_bed_price": 300.0},
+        {"room_number": "000", "occupancy": "Single", "room_type": "Triple", "is_ac": False, "price_per_night": 00.0,
+         "extra_bed_price": 300.0},
+        {"room_number": "000", "occupancy": "Single", "room_type": "Luxury", "is_ac": True, "price_per_night": 00.0,
+         "extra_bed_price": 300.0},
+        {"room_number": "000", "occupancy": "Double", "room_type": "Studio", "is_ac": True, "price_per_night": 00.0,
+         "extra_bed_price": 300.0},
+        {"room_number": "000", "occupancy": "Single", "room_type": "Triple", "is_ac": True, "price_per_night": 00.0,
+         "extra_bed_price": 300.0},
+
         {"room_number": "001", "occupancy": "Single", "room_type": "Luxury", "is_ac": False, "price_per_night": 1300.0,
          "extra_bed_price": 300.0},
         {"room_number": "001", "occupancy": "Double", "room_type": "Luxury", "is_ac": False, "price_per_night": 1500.0,
