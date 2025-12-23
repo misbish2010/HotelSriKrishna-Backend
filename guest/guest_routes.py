@@ -1020,7 +1020,6 @@ def get_payments_by_date():
         .distinct()
         .all()
     )
-    print("****************************")
     print(all_bookings_with_payments)
 
     for booking in all_bookings_with_payments:
@@ -1046,8 +1045,6 @@ def get_payments_by_date():
             for pay in advance_payments
             if pay.payment_amount > 0
         ]
-        print(advance_payments)
-        print(advance_paid_dates)
 
         total_advance_before_checkin = sum(
             p.payment_amount for p in advance_payments if p.payment_amount > 0
@@ -1065,8 +1062,6 @@ def get_payments_by_date():
             )
             .scalar()
         )
-        print(total_advance_before_checkin)
-        print(total_paid_upto_today)
 
 
         # 3️⃣ Detect full adjustment today
@@ -1098,7 +1093,6 @@ def get_payments_by_date():
                         br.room.room_number for br in booking.room_associations
                     ]
                 })
-    print(pending_payment_details)
     return jsonify({
         "payment_details": payment_details,
         "pending_payment_details": pending_payment_details,
