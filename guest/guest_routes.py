@@ -15,7 +15,9 @@ guest_bp = Blueprint(
     template_folder='templates',
     static_folder='static'
 )
-
+# -------------------------
+# Helpers
+# -------------------------
 
 def booking_active_on_date(b, target_date):
     b_checkin = b.check_in_date.date() if b.check_in_date else None
@@ -30,6 +32,294 @@ def booking_active_on_date(b, target_date):
     if b_checkout:
         return b_checkin <= target_date < b_checkout
     return b_checkin <= target_date
+
+
+def _date_only(dt):
+    if dt is None:
+        return None
+    return dt.date() if isinstance(dt, datetime) else dt
+
+
+def guest_info_from_booking(b):
+    if not b or not getattr(b, "customer", None):
+        return None, None
+    return getattr(b.customer, "name", None), getattr(b.customer, "phone", None)
+
+
+@guest_bp.route("/api/daily-chart", methods=["GET"])
+def daily_chart():
+    """
+    Query param:
+      - date=YYYY-MM-DD  (required)
+
+    Returns:
+      { date: "YYYY-MM-DD", rooms: [ { room_number, status, guest_name, phone, current_guest_name, current_guest_phone, next_guest_name, next_guest_phone } ] }
+    Statuses: available, checked_in, new_booking, continue_checked_in, continue_confirmed, checkout_to_new_booking, checkout_available
+    """
+
+    try:
+        date_str = request.args.get("date")
+        if not date_str:
+            return jsonify({"error": "missing 'date' param (YYYY-MM-DD)"}), 400
+
+        try:
+            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except Exception:
+            return jsonify({"error": "invalid 'date' format; expected YYYY-MM-DD"}), 400
+
+        db = model_routes.db
+        Booking = model_routes.Booking
+        BookingRoom = model_routes.BookingRoom
+        Room = model_routes.Room
+
+        # ---------------------------------------------------------
+        # Load all rooms and dedupe by room_number
+        # ---------------------------------------------------------
+        all_rooms = Room.query.order_by(Room.room_number.asc()).all()
+        unique_rooms_by_number = {}
+        for r in all_rooms:
+            if r.room_number not in unique_rooms_by_number:
+                unique_rooms_by_number[r.room_number] = r
+        rooms_list = list(unique_rooms_by_number.values())
+
+        # ---------------------------------------------------------
+        # Query BookingRoom rows for bookings that overlap the target date
+        # Condition (date-only):
+        #   check_in_date <= target_date
+        # AND
+        #   ( expected_check_out_date is NULL OR expected_check_out_date >= target_date )
+        # AND status in (Confirmed, Checked-In)
+        # ---------------------------------------------------------
+        overlapping_br_rows = (
+            db.session.query(BookingRoom)
+            .join(Booking, BookingRoom.booking_id == Booking.id)
+            .options(
+                joinedload(BookingRoom.booking).joinedload(Booking.customer)
+            )
+            .filter(
+                Booking.status.in_(["Confirmed", "Checked-In", "Checked-Out"]),
+                func.date(Booking.check_in_date) <= target_date,
+                or_(
+                    Booking.expected_check_out_date == None,
+                    func.date(Booking.expected_check_out_date) >= target_date,
+                    ),
+                )
+            .all()
+        )
+
+        # Map room_id -> list of bookings (overlapping)
+        overlapping_by_room = {}
+        for br in overlapping_br_rows:
+            overlapping_by_room.setdefault(br.room_id, []).append(br.booking)
+        # Also fetch bookings that START exactly on target_date (to ensure we catch new bookings)
+        starting_today_br_rows = (
+            db.session.query(BookingRoom)
+            .join(Booking, BookingRoom.booking_id == Booking.id)
+            .options(
+                joinedload(BookingRoom.booking).joinedload(Booking.customer)
+            )
+            .filter(
+                Booking.status.in_(["Confirmed", "Checked-In"]),
+                func.date(Booking.check_in_date) == target_date
+            )
+            .all()
+        )
+        starting_today_by_room = {}
+        for br in starting_today_br_rows:
+            starting_today_by_room.setdefault(br.room_id, []).append(br.booking)
+        rooms_resp = []
+
+        # ---------------------------------------------------------
+        # For each unique room_number, gather bookings from all variant room ids
+        # ---------------------------------------------------------
+        for room in rooms_list:
+            # all DB ids that share this room_number
+            variant_ids = [r.id for r in all_rooms if r.room_number == room.room_number]
+
+            # gather overlapping bookings and starting-today bookings across variants
+            overlapping_bookings = []
+            starting_today_bookings = []
+            for rid in variant_ids:
+                overlapping_bookings.extend(overlapping_by_room.get(rid, []))
+                starting_today_bookings.extend(starting_today_by_room.get(rid, []))
+
+            # dedupe bookings by id (same booking might be linked to multiple variants)
+            overlapping_bookings = list({b.id: b for b in overlapping_bookings}.values())
+            starting_today_bookings = list({b.id: b for b in starting_today_bookings}.values())
+
+            # Initialize response object
+            resp = {
+                "room_number": room.room_number,
+                "status": "available",
+                "guest_name": None,
+                "phone": None,
+                "current_guest_name": None,
+                "current_guest_phone": None,
+                "next_guest_name": None,
+                "next_guest_phone": None,
+                "next_check_in_time": None,
+                "current_check_out_time": None,
+            }
+
+            # Holder variables
+            # booking that covers the day (strict: checkin < target_date < checkout)
+            current_booking = None
+            # booking that has check_in == target_date and status == Checked-In
+            checked_in_today_booking = None
+            # booking that has check_in == target_date and status == Confirmed
+            new_booking_today = None
+            # booking whose checkout (expected or computed) == target_date
+            checkout_today_booking = None
+            active_bookings = []
+
+
+            # Evaluate overlapping bookings
+            for b in overlapping_bookings:
+                b_checkin = _date_only(b.check_in_date)
+                b_checkout = _date_only(b.expected_check_out_date)
+                if booking_active_on_date(b, target_date):
+                    active_bookings.append(b)
+                if b_checkout is None:
+                    # compute checkout from duration_of_stay if available
+                    if getattr(b, "duration_of_stay", None) is not None:
+                        b_checkout = (b.check_in_date + timedelta(days=b.duration_of_stay)).date()
+                    else:
+                        b_checkout = None
+                status_norm = (b.status or "").strip().lower()
+
+                # starts today?
+                if b_checkin == target_date:
+                    if status_norm == "checked-in":
+                        checked_in_today_booking = checked_in_today_booking or b
+
+                    elif status_norm == "checked-out":
+                        checked_in_today_booking = checked_in_today_booking or b
+
+                    elif status_norm == "confirmed":
+                        # if multiple new bookings today, pick earliest check_in datetime (if needed)
+                        if not new_booking_today:
+                            new_booking_today = b
+                        else:
+                            if getattr(b, "check_in_date", None) and getattr(new_booking_today, "check_in_date", None):
+                                if b.check_in_date < new_booking_today.check_in_date:
+                                    new_booking_today = b
+
+                # ends today?
+                if b_checkout == target_date and not booking_active_on_date(b, target_date):
+                    checkout_today_booking = checkout_today_booking or b
+
+                # covers the day? **STRICT**: checkin < target_date < checkout
+                if b_checkin is not None and b_checkout is not None:
+
+                    if (b_checkin < target_date) and (b_checkout > target_date):
+                        # Prefer Checked-In bookings over Confirmed when selecting current_booking
+                        if not current_booking:
+                            current_booking = b
+                        else:
+                            if (current_booking.status or "").strip().lower() != "checked-in" and status_norm == "checked-in":
+                                current_booking = b
+
+            # Also include bookings that were explicitly found in starting_today query (defensive)
+            for b in starting_today_bookings:
+                status_norm = (b.status or "").strip().lower()
+                if status_norm == "checked-in":
+                    checked_in_today_booking = checked_in_today_booking or b
+                elif status_norm == "confirmed":
+                    new_booking_today = new_booking_today or b
+
+            # -------------------------
+            # Decision priority (executed exactly in this order):
+            # 1) If someone checked-in today -> "checked_in"
+            # 2) If checkout today AND there is a new booking today (different booking) -> "checkout_to_new_booking"
+            # 3) If current_booking spanning day -> continue_checked_in OR continue_confirmed
+            # 4) If new_booking_today (confirmed) -> "new_booking"
+            # 5) If checkout_today_booking exists -> "checkout_available"
+            # 6) else available
+            # -------------------------
+
+            # 1) checked_in today
+            if checked_in_today_booking:
+                resp["status"] = "checked_in"
+                gm, ph = guest_info_from_booking(checked_in_today_booking)
+                resp["guest_name"] = gm
+                resp["phone"] = ph
+
+            # 2) checkout today and new booking today (different bookings)
+            elif checkout_today_booking and new_booking_today and checkout_today_booking.id != new_booking_today.id:
+                resp["status"] = "checkout_to_new_booking"
+                cur_name, cur_phone = guest_info_from_booking(checkout_today_booking)
+                nxt_name, nxt_phone = guest_info_from_booking(new_booking_today)
+                resp["current_guest_name"] = cur_name
+                resp["current_guest_phone"] = cur_phone
+                resp["next_guest_name"] = nxt_name
+                resp["next_guest_phone"] = nxt_phone
+                resp["current_check_out_time"] = checkout_today_booking.expected_check_out_date
+                resp["next_check_in_time"] = new_booking_today.check_in_date
+
+
+            # 3) current spanning booking
+            elif current_booking:
+                if (current_booking.status or "").strip().lower() == "checked-in":
+                    resp["status"] = "continue_checked_in"
+                elif (current_booking.status or "").strip().lower() == "checked-out":
+                    resp["status"] = "continue_checked_in"
+                else:
+                    resp["status"] = "continue_confirmed"
+                gm, ph = guest_info_from_booking(current_booking)
+                resp["guest_name"] = gm
+                resp["phone"] = ph
+
+            # 4) new booking today (confirmed, not checked-in)
+            elif new_booking_today:
+                resp["status"] = "new_booking"
+                gm, ph = guest_info_from_booking(new_booking_today)
+                resp["guest_name"] = gm
+                resp["phone"] = ph
+                resp["next_check_in_time"] = new_booking_today.check_in_date
+
+            # 5) checkout today and no new booking
+            elif checkout_today_booking:
+                resp["status"] = "checkout_available"
+                gm, ph = guest_info_from_booking(checkout_today_booking)
+                resp["guest_name"] = gm
+                resp["phone"] = ph
+                resp["current_check_out_time"] = checkout_today_booking.expected_check_out_date
+
+            else:
+                resp["status"] = "available"
+
+            # -------------------------
+            # Conflict detection
+            # -------------------------
+            if len(active_bookings) > 1:
+                resp["conflict"] = True
+                resp["conflict_bookings"] = [
+                    {
+                        "booking_id": b.id,
+                        "guest_name": b.customer.name if b.customer else None,
+                        "phone": b.customer.phone if b.customer else None,
+                        "status": b.status,
+                        "check_in": b.check_in_date,
+                        "check_out": b.expected_check_out_date,
+                    }
+                    for b in active_bookings
+                ]
+            else:
+                resp["conflict"] = False
+                resp["conflict_bookings"] = []
+
+            rooms_resp.append(resp)
+
+        # stable ordering
+        rooms_resp = sorted(rooms_resp, key=lambda x: str(x["room_number"]))
+
+        return jsonify({"date": target_date.strftime("%Y-%m-%d"), "rooms": rooms_resp}), 200
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
 
 
 def format_phone_number(phone_number, default_country="IN"):
@@ -1020,7 +1310,6 @@ def get_payments_by_date():
         .distinct()
         .all()
     )
-    print(all_bookings_with_payments)
 
     for booking in all_bookings_with_payments:
 
@@ -1206,272 +1495,6 @@ def bookings_by_date_range():
         print("Error in bookings_by_date_range:", e)
         return jsonify({"message": "Error occurred", "error": str(e)}), 500
 
-def _date_only(dt):
-    if dt is None:
-        return None
-    return dt.date() if isinstance(dt, datetime) else dt
-
-
-def guest_info_from_booking(b):
-    if not b or not getattr(b, "customer", None):
-        return None, None
-    return getattr(b.customer, "name", None), getattr(b.customer, "phone", None)
-
-
-@guest_bp.route("/api/daily-chart", methods=["GET"])
-def daily_chart():
-    """
-    Query param:
-      - date=YYYY-MM-DD  (required)
-
-    Returns:
-      { date: "YYYY-MM-DD", rooms: [ { room_number, status, guest_name, phone,
-        current_guest_name, current_guest_phone, next_guest_name, next_guest_phone } ] }
-
-    Statuses:
-      available, checked_in, new_booking,
-      continue_checked_in, continue_confirmed,
-      checkout_to_new_booking, checkout_available
-    """
-    try:
-        date_str = request.args.get("date")
-        if not date_str:
-            return jsonify({"error": "missing 'date' param (YYYY-MM-DD)"}), 400
-
-        try:
-            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        except Exception:
-            return jsonify({"error": "invalid 'date' format; expected YYYY-MM-DD"}), 400
-
-        db = model_routes.db
-        Booking = model_routes.Booking
-        BookingRoom = model_routes.BookingRoom
-        Room = model_routes.Room
-
-        # ---------------------------------------------------------
-        # Load all rooms and dedupe by room_number
-        # ---------------------------------------------------------
-        all_rooms = Room.query.order_by(Room.room_number.asc()).all()
-        unique_rooms_by_number = {}
-        for r in all_rooms:
-            unique_rooms_by_number.setdefault(r.room_number, []).append(r)
-
-        # ---------------------------------------------------------
-        # Query overlapping bookings
-        # ---------------------------------------------------------
-        overlapping_br_rows = (
-            db.session.query(BookingRoom)
-            .join(Booking, BookingRoom.booking_id == Booking.id)
-            .options(joinedload(BookingRoom.booking).joinedload(Booking.customer))
-            .filter(
-                Booking.status.in_(["Confirmed", "Checked-In", "Checked-Out"]),
-                Booking.check_in_date != None,
-                func.date(Booking.check_in_date) <= target_date,
-                or_(
-                    Booking.expected_check_out_date == None,
-                    func.date(Booking.expected_check_out_date) >= target_date,
-                    ),
-                )
-            .all()
-        )
-
-        overlapping_by_room = {}
-        for br in overlapping_br_rows:
-            overlapping_by_room.setdefault(br.room_id, []).append(br.booking)
-
-        # Bookings starting today (defensive – keep existing behavior)
-        starting_today_br_rows = (
-            db.session.query(BookingRoom)
-            .join(Booking, BookingRoom.booking_id == Booking.id)
-            .options(joinedload(BookingRoom.booking).joinedload(Booking.customer))
-            .filter(
-                Booking.status.in_(["Confirmed", "Checked-In"]),
-                func.date(Booking.check_in_date) == target_date
-            )
-            .all()
-        )
-
-        starting_today_by_room = {}
-        for br in starting_today_br_rows:
-            starting_today_by_room.setdefault(br.room_id, []).append(br.booking)
-
-        rooms_resp = []
-
-        # ---------------------------------------------------------
-        # Per room_number evaluation
-        # ---------------------------------------------------------
-        for room_number, room_variants in unique_rooms_by_number.items():
-            variant_ids = [r.id for r in room_variants]
-
-            overlapping_bookings = []
-            starting_today_bookings = []
-            for rid in variant_ids:
-                overlapping_bookings.extend(overlapping_by_room.get(rid, []))
-                starting_today_bookings.extend(starting_today_by_room.get(rid, []))
-
-            # dedupe
-            overlapping_bookings = list({b.id: b for b in overlapping_bookings}.values())
-            starting_today_bookings = list({b.id: b for b in starting_today_bookings}.values())
-
-            resp = {
-                "room_number": room_number,
-                "status": "available",
-                "guest_name": None,
-                "phone": None,
-                "current_guest_name": None,
-                "current_guest_phone": None,
-                "next_guest_name": None,
-                "next_guest_phone": None,
-                "next_check_in_time": None,
-                "current_check_out_time": None,
-            }
-
-            current_booking = None
-            checked_in_today_booking = None
-            new_booking_today = None
-            checkout_today_booking = None
-            active_bookings = []
-
-            # ---------------------------------------------------------
-            # Evaluate bookings
-            # ---------------------------------------------------------
-            for b in overlapping_bookings:
-                b_checkin = _date_only(b.check_in_date)
-                b_checkout = _date_only(b.expected_check_out_date)
-                if b_checkout is None and getattr(b, "duration_of_stay", None) is not None:
-                    b_checkout = (b.check_in_date + timedelta(days=b.duration_of_stay)).date()
-
-                is_same_day = (b_checkin == target_date and b_checkout == target_date)
-                status_norm = (b.status or "").strip().lower()
-
-                if (
-                        status_norm == "checked-out"
-                        and b_checkout
-                        and b_checkout > target_date
-                ):
-                    # Treat as checked-in for chart purposes
-                    status_norm = "checked-in"
-
-                # active booking (exclude same-day to avoid conflict inflation)
-                if booking_active_on_date(b, target_date) and not is_same_day:
-                    active_bookings.append(b)
-
-                # SAME-DAY check-in & checkout
-                if is_same_day:
-                    checked_in_today_booking = checked_in_today_booking or b
-                    checkout_today_booking = checkout_today_booking or b
-                    continue
-
-                # starts today
-                if b_checkin == target_date:
-                    if status_norm == "checked-in":
-                        checked_in_today_booking = checked_in_today_booking or b
-                    elif status_norm == "confirmed":
-                        new_booking_today = new_booking_today or b
-
-                # ends today
-                if b_checkout == target_date:
-                    checkout_today_booking = checkout_today_booking or b
-
-                # spans day (strict)
-                if b_checkin < target_date and b_checkout and b_checkout > target_date:
-                    if not current_booking:
-                        current_booking = b
-                    elif (
-                            (current_booking.status or "").lower() != "checked-in"
-                            and status_norm == "checked-in"
-                    ):
-                        current_booking = b
-
-            # defensive starting-today
-            for b in starting_today_bookings:
-                status_norm = (b.status or "").strip().lower()
-                if status_norm == "checked-in":
-                    checked_in_today_booking = checked_in_today_booking or b
-                elif status_norm == "confirmed":
-                    new_booking_today = new_booking_today or b
-
-            # ---------------------------------------------------------
-            # Decision priority (CRITICAL)
-            # ---------------------------------------------------------
-
-            # 1) checkout → new booking (same day)
-            if (
-                    checkout_today_booking
-                    and new_booking_today
-                    and checkout_today_booking.id != new_booking_today.id
-            ):
-                resp["status"] = "checkout_to_new_booking"
-                cur = checkout_today_booking
-                nxt = new_booking_today
-                resp["current_guest_name"], resp["current_guest_phone"] = guest_info_from_booking(cur)
-                resp["next_guest_name"], resp["next_guest_phone"] = guest_info_from_booking(nxt)
-                resp["current_check_out_time"] = cur.expected_check_out_date
-                resp["next_check_in_time"] = nxt.check_in_date
-
-            # 2) checked-in today (includes same-day)
-            elif checked_in_today_booking:
-                resp["status"] = "checked_in"
-                b = checked_in_today_booking
-                resp["guest_name"], resp["phone"] = guest_info_from_booking(b)
-                if checkout_today_booking and checkout_today_booking.id == b.id:
-                    resp["current_check_out_time"] = b.expected_check_out_date
-
-            # 3) spanning booking
-            elif current_booking:
-                resp["status"] = (
-                    "continue_checked_in"
-                    if (current_booking.status or "").lower() == "checked-in"
-                    else "continue_confirmed"
-                )
-                resp["guest_name"], resp["phone"] = guest_info_from_booking(current_booking)
-
-            # 4) new booking today
-            elif new_booking_today:
-                resp["status"] = "new_booking"
-                resp["guest_name"], resp["phone"] = guest_info_from_booking(new_booking_today)
-                resp["next_check_in_time"] = new_booking_today.check_in_date
-
-            # 5) checkout only → available
-            elif checkout_today_booking and not checked_in_today_booking:
-                resp["status"] = "checkout_available"
-                resp["guest_name"], resp["phone"] = guest_info_from_booking(checkout_today_booking)
-                resp["current_check_out_time"] = checkout_today_booking.expected_check_out_date
-
-            else:
-                resp["status"] = "available"
-
-            # ---------------------------------------------------------
-            # Conflict detection
-            # ---------------------------------------------------------
-            if len(active_bookings) > 1:
-                resp["conflict"] = True
-                resp["conflict_bookings"] = [
-                    {
-                        "booking_id": b.id,
-                        "guest_name": b.customer.name if b.customer else None,
-                        "phone": b.customer.phone if b.customer else None,
-                        "status": b.status,
-                        "check_in": b.check_in_date,
-                        "check_out": b.expected_check_out_date,
-                    }
-                    for b in active_bookings
-                ]
-            else:
-                resp["conflict"] = False
-                resp["conflict_bookings"] = []
-
-            rooms_resp.append(resp)
-
-        rooms_resp.sort(key=lambda x: str(x["room_number"]))
-        return jsonify({"date": target_date.strftime("%Y-%m-%d"), "rooms": rooms_resp}), 200
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-
-
 
 @guest_bp.route('/api/add_expense', methods=['POST'])
 def add_expense():
@@ -1496,3 +1519,4 @@ def add_expense():
     model_routes.db.session.commit()
 
     return jsonify({'message': 'New Expense Record created successfully'}), 201
+
