@@ -240,50 +240,58 @@ def daily_chart():
             # 1) checked_in today
             if checked_in_today_booking:
                 resp["status"] = "checked_in"
-                gm, ph = guest_info_from_booking(checked_in_today_booking)
-                resp["guest_name"] = gm
-                resp["phone"] = ph
+                cur_name, cur_phone = guest_info_from_booking(checked_in_today_booking)
+                resp["current_guest_name"] = cur_name
+                resp["current_guest_phone"] = cur_phone
 
-            # 2) checkout today and new booking today (different bookings)
+
+            # 2) checkout today + new booking today
             elif checkout_today_booking and new_booking_today and checkout_today_booking.id != new_booking_today.id:
                 resp["status"] = "checkout_to_new_booking"
+
                 cur_name, cur_phone = guest_info_from_booking(checkout_today_booking)
                 nxt_name, nxt_phone = guest_info_from_booking(new_booking_today)
+
                 resp["current_guest_name"] = cur_name
                 resp["current_guest_phone"] = cur_phone
                 resp["next_guest_name"] = nxt_name
                 resp["next_guest_phone"] = nxt_phone
+
                 resp["current_check_out_time"] = checkout_today_booking.expected_check_out_date
                 resp["next_check_in_time"] = new_booking_today.check_in_date
 
 
             # 3) current spanning booking
             elif current_booking:
-                if (current_booking.status or "").strip().lower() == "checked-in":
-                    resp["status"] = "continue_checked_in"
-                elif (current_booking.status or "").strip().lower() == "checked-out":
+                if (current_booking.status or "").lower() == "checked-in":
                     resp["status"] = "continue_checked_in"
                 else:
                     resp["status"] = "continue_confirmed"
-                gm, ph = guest_info_from_booking(current_booking)
-                resp["guest_name"] = gm
-                resp["phone"] = ph
 
-            # 4) new booking today (confirmed, not checked-in)
+                cur_name, cur_phone = guest_info_from_booking(current_booking)
+                resp["current_guest_name"] = cur_name
+                resp["current_guest_phone"] = cur_phone
+
+
+            # 4) new booking today (not checked-in)
             elif new_booking_today:
                 resp["status"] = "new_booking"
-                gm, ph = guest_info_from_booking(new_booking_today)
-                resp["guest_name"] = gm
-                resp["phone"] = ph
+
+                nxt_name, nxt_phone = guest_info_from_booking(new_booking_today)
+                resp["next_guest_name"] = nxt_name
+                resp["next_guest_phone"] = nxt_phone
                 resp["next_check_in_time"] = new_booking_today.check_in_date
+
 
             # 5) checkout today and no new booking
             elif checkout_today_booking:
                 resp["status"] = "checkout_available"
-                gm, ph = guest_info_from_booking(checkout_today_booking)
-                resp["guest_name"] = gm
-                resp["phone"] = ph
+
+                cur_name, cur_phone = guest_info_from_booking(checkout_today_booking)
+                resp["current_guest_name"] = cur_name
+                resp["current_guest_phone"] = cur_phone
                 resp["current_check_out_time"] = checkout_today_booking.expected_check_out_date
+
 
             else:
                 resp["status"] = "available"
@@ -350,8 +358,6 @@ def retrieve_customer():
 
     return jsonify({"error": "No Customer Details Found"}), 201
 
-
-import traceback
 
 @guest_bp.route("/api/create-booking", methods=["POST"])
 def create_booking():
@@ -798,50 +804,60 @@ def update_booking():
 
 @guest_bp.route("/api/bookings/<int:booking_id>/gst-invoice", methods=["GET"])
 def get_or_create_invoice(booking_id):
-    # 1. Check if invoice already exists for this booking
+
+    # 1️⃣ Check existing invoice
     invoice = model_routes.GSTBillMapping.query.filter_by(booking_id=booking_id).first()
     if invoice:
         return jsonify({
-            'gst_bill_no': invoice.gst_bill_no,
-            'gst_bill_date': invoice.gst_bill_date
+            "gst_bill_no": invoice.gst_bill_no,
+            "gst_bill_date": invoice.gst_bill_date.strftime("%Y-%m-%d")
         }), 200
 
-    # 2. Generate fiscal year and month info
-    current_date = datetime.now()
-    fiscal_year_start = current_date.year if current_date.month >= 4 else current_date.year - 1
-    fiscal_year_end = fiscal_year_start + 1
-    fiscal_year = f"FY{fiscal_year_start}-{fiscal_year_end}"
-    current_month = f"{current_date.month:02d}"
+    # 2️⃣ Fetch booking
+    booking = model_routes.Booking.query.get_or_404(booking_id)
 
-    # 3. Get the latest GST bill number for this fiscal year/month
-    latest_mapping = (
+    if not booking.expected_check_out_date:
+        return jsonify({"message": "Checkout date not available"}), 400
+
+    invoice_date = booking.expected_check_out_date  # 🔑 KEY CHANGE
+
+    # 3️⃣ Financial year calculation
+    fy_start = invoice_date.year if invoice_date.month >= 4 else invoice_date.year - 1
+    fy_end = fy_start + 1
+    fiscal_year = f"{fy_start}-{str(fy_end)[-2:]}"  # 2025-26
+
+    month = f"{invoice_date.month:02d}"
+
+    # 4️⃣ Get last invoice of same FY + month
+    last_invoice = (
         model_routes.GSTBillMapping.query
-        .filter(model_routes.GSTBillMapping.gst_bill_no.like(f"HSK/{fiscal_year}/{current_month}/%"))
+        .filter(model_routes.GSTBillMapping.gst_bill_no.like(f"HSK/{fiscal_year}/{month}/%"))
         .order_by(model_routes.GSTBillMapping.gst_bill_no.desc())
         .first()
     )
 
-    if latest_mapping:
-        latest_number = int(latest_mapping.gst_bill_no.split('/')[-1])
-        next_number = latest_number + 1
+    if last_invoice:
+        last_number = int(last_invoice.gst_bill_no.split("/")[-1])
+        next_number = last_number + 1
     else:
-        next_number = 1  # Start fresh for this month/year
+        next_number = 1
 
-    # 4. Generate new GST bill number
-    new_gst_bill_no = f"HSK/{fiscal_year}/{current_month}/{next_number:03d}"
+    # 5️⃣ Generate GST bill number
+    gst_bill_no = f"HSK/{fiscal_year}/{month}/{next_number:03d}"
 
-    # 5. Save mapping to DB
+    # 6️⃣ Save mapping
     new_mapping = model_routes.GSTBillMapping(
         booking_id=booking_id,
-        gst_bill_no=new_gst_bill_no,
-        gst_bill_date=datetime.utcnow()
+        gst_bill_no=gst_bill_no,
+        gst_bill_date=invoice_date  # 🔑 checkout date
     )
+
     model_routes.db.session.add(new_mapping)
     model_routes.db.session.commit()
 
     return jsonify({
-        'gst_bill_no': new_mapping.gst_bill_no,
-        'gst_bill_date': new_mapping.gst_bill_date
+        "gst_bill_no": gst_bill_no,
+        "gst_bill_date": invoice_date.strftime("%Y-%m-%d")
     }), 200
 
 
@@ -849,18 +865,35 @@ def get_or_create_invoice(booking_id):
 @guest_bp.route('/api/room/dashboard', methods=['GET'])
 def check_rooms_dashboard():
     try:
-        start_date = datetime.strptime(request.args.get('startDate'), '%Y-%m-%dT%H:%M:%S.%fZ')
-        end_date = datetime.strptime(request.args.get('endDate'), '%Y-%m-%dT%H:%M:%S.%fZ')
+        # 1️⃣ Parse UTC from UI
+        start_dt_utc = datetime.strptime(
+            request.args.get('startDate'),
+            '%Y-%m-%dT%H:%M:%S.%fZ'
+        ).replace(tzinfo=timezone.utc)
 
-        # Adjust to cover full days
-        start_of_day = datetime.combine(start_date, datetime.min.time())
-        end_of_day = datetime.combine(end_date, datetime.max.time())
+        end_dt_utc = datetime.strptime(
+            request.args.get('endDate'),
+            '%Y-%m-%dT%H:%M:%S.%fZ'
+        ).replace(tzinfo=timezone.utc)
 
-        # 🔹 Fetch all bookings in the date range
+        # 2️⃣ Convert to IST
+        start_dt_ist = start_dt_utc.astimezone(IST)
+        end_dt_ist = end_dt_utc.astimezone(IST)
+
+        # 3️⃣ Extract DATE boundaries (IST)
+        start_date = start_dt_ist.date()
+        end_date = end_dt_ist.date()
+
+        # 4️⃣ NIGHT-OVERLAP RANGE (critical logic)
+        range_start = datetime.combine(start_date, datetime.min.time())
+        range_end = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
+
+        # 5️⃣ Overlap condition (hotel-correct)
         bookings = model_routes.Booking.query.filter(
-            model_routes.Booking.check_in_date < end_of_day,
-            (model_routes.Booking.expected_check_out_date == None) | (model_routes.Booking.expected_check_out_date > start_of_day)
+            model_routes.Booking.check_in_date < range_end,
+            model_routes.Booking.expected_check_out_date > range_start
         ).all()
+        print(bookings)
 
         booking_details = []
         booked_room_numbers = set()
@@ -946,95 +979,186 @@ def check_rooms_dashboard():
         return jsonify({'error': str(e)}), 500
 
 
+# @guest_bp.route('/api/room/status', methods=['GET'])
+# def check_rooms_status():
+#     duration_window = int(request.args.get('booking_window'))
+#     target_check_in_date = datetime.strptime(request.args.get('checkInDateTime'), '%Y-%m-%dT%H:%M:%S.%fZ')
+#     target_check_out_date = target_check_in_date + timedelta(hours=duration_window)
+#
+#     # Step 1: Get all active bookings
+#     active_bookings = model_routes.Booking.query.filter(
+#         model_routes.Booking.status.in_(["Confirmed", "Checked-In"])
+#     ).all()
+#
+#
+#     booked_rooms = set()  # A set of tuples (room, room_number)
+#     for booking in active_bookings:
+#         # Calculate the actual check-out date (expected or actual)
+#         calculated_check_out_date = (
+#             booking.check_in_date + timedelta(days=booking.duration_of_stay)
+#             if booking.duration_of_stay else None
+#         )
+#         # Check if the booking overlaps with the target date range
+#         if (
+#                 booking.check_in_date < target_check_out_date and
+#                 calculated_check_out_date > target_check_in_date
+#         ):
+#             # Add associated room IDs and room numbers to the booked list
+#             for room_association in booking.room_associations:
+#                 # Fetch room details (assuming room_association.room provides access to room object)
+#                 room = room_association.room  # Replace with the correct property or query if needed
+#                 booked_rooms.add((room.id, room.room_number))  # Collect both ID and number
+#     # Step 4: Fetch all rooms with matching room numbers
+#     # Extract room numbers from the booked_rooms set
+#     booked_room_numbers = [room_number for _, room_number in booked_rooms]
+#     booked_room_ids = [room_id for room_id, _ in booked_rooms]
+#     all_rooms = model_routes.Room.query.all()
+#     booked_rooms_list = [room for room in all_rooms if room.id in booked_room_ids]
+#     available_rooms_list = [room for room in all_rooms if room.room_number not in booked_room_numbers]
+#
+#     unique_available_rooms = {}
+#     for room in available_rooms_list:
+#         if room.room_number not in booked_room_numbers:
+#             unique_available_rooms[room.room_number] = room
+#
+#     # Get the unique available rooms
+#     unique_available_rooms_list = list(unique_available_rooms.values())
+#     booked_rooms_details = [
+#         {
+#             'room_number': room.room_number,
+#             'bookings': [
+#                 {
+#                     'booking_id': association.booking.id,
+#                     'customer_name': association.booking.customer.name,
+#                     'customer_contact': association.booking.customer.phone,
+#                     'check_in_date': association.booking.check_in_date,  # Include check-in date
+#                     'probable_check_out_date': association.booking.expected_check_out_date,  # Include check-out date
+#                     'duration_of_stay': association.booking.duration_of_stay,  # Include duration of stay
+#                     'room_type': room.room_type,  # Include room type
+#                     'is_ac': room.is_ac,  # Include AC status
+#                     'occupancy': room.occupancy,  # Include occupancy
+#                     'payment_details': [
+#                         {
+#                             'payment_id': payment.id,
+#                             'payment_amount': payment.payment_amount,
+#                             'payment_date': payment.payment_date
+#                         }
+#                         for payment in association.booking.payments
+#                     ],
+#                     'booking_status': association.booking.status,
+#                     'final_price_per_night': association.booking.final_price_per_night
+#                 }
+#                 for association in room.booking_associations
+#                 if (
+#                         association.booking.status in ["Checked-In", "Confirmed"] and
+#                         association.booking.check_in_date < target_check_out_date and
+#                         (
+#                                 association.booking.expected_check_out_date is None or
+#                                 association.booking.expected_check_out_date > target_check_in_date
+#                         )
+#                 )
+#             ]
+#         }
+#         for room in booked_rooms_list
+#     ]
+#
+#
+#     available_rooms_details = [{'room_number': room.room_number,
+#                                 'room_type': room.room_type}
+#                                for room in unique_available_rooms_list]
+#
+#     return jsonify({'booked_rooms': booked_rooms_details, 'available_rooms': available_rooms_details}), 200
+
+
 @guest_bp.route('/api/room/status', methods=['GET'])
 def check_rooms_status():
-    duration_window = int(request.args.get('booking_window'))
-    target_check_in_date = datetime.strptime(request.args.get('checkInDateTime'), '%Y-%m-%dT%H:%M:%S.%fZ')
-    target_check_out_date = target_check_in_date + timedelta(hours=duration_window)
+    try:
+        # -------------------------------
+        # 1️⃣ Parse request (UTC → IST)
+        # -------------------------------
+        checkin_utc = datetime.strptime(
+            request.args.get('checkInDateTime'),
+            '%Y-%m-%dT%H:%M:%S.%fZ'
+        ).replace(tzinfo=timezone.utc)
 
-    # Step 1: Get all active bookings
-    active_bookings = model_routes.Booking.query.filter(
-        model_routes.Booking.status.in_(["Confirmed", "Checked-In"])
-    ).all()
+        booking_window_hours = int(request.args.get('booking_window'))
 
+        requested_start = checkin_utc.astimezone(IST).replace(tzinfo=None)
+        requested_end = requested_start + timedelta(hours=booking_window_hours)
 
-    booked_rooms = set()  # A set of tuples (room, room_number)
-    for booking in active_bookings:
-        # Calculate the actual check-out date (expected or actual)
-        calculated_check_out_date = (
-            booking.check_in_date + timedelta(days=booking.duration_of_stay)
-            if booking.duration_of_stay else None
-        )
-        # Check if the booking overlaps with the target date range
-        if (
-                booking.check_in_date < target_check_out_date and
-                calculated_check_out_date > target_check_in_date
-        ):
-            # Add associated room IDs and room numbers to the booked list
-            for room_association in booking.room_associations:
-                # Fetch room details (assuming room_association.room provides access to room object)
-                room = room_association.room  # Replace with the correct property or query if needed
-                booked_rooms.add((room.id, room.room_number))  # Collect both ID and number
-    # Step 4: Fetch all rooms with matching room numbers
-    # Extract room numbers from the booked_rooms set
-    booked_room_numbers = [room_number for _, room_number in booked_rooms]
-    booked_room_ids = [room_id for room_id, _ in booked_rooms]
-    all_rooms = model_routes.Room.query.all()
-    booked_rooms_list = [room for room in all_rooms if room.id in booked_room_ids]
-    available_rooms_list = [room for room in all_rooms if room.room_number not in booked_room_numbers]
+        # -------------------------------
+        # 2️⃣ Fetch ACTIVE bookings only
+        # -------------------------------
+        active_bookings = model_routes.Booking.query.filter(
+            model_routes.Booking.status.in_(["Confirmed", "Checked-In"])
+        ).all()
 
-    unique_available_rooms = {}
-    for room in available_rooms_list:
-        if room.room_number not in booked_room_numbers:
-            unique_available_rooms[room.room_number] = room
+        blocked_room_numbers = set()
+        booked_rooms_details = {}
 
-    # Get the unique available rooms
-    unique_available_rooms_list = list(unique_available_rooms.values())
-    booked_rooms_details = [
-        {
-            'room_number': room.room_number,
-            'bookings': [
-                {
-                    'booking_id': association.booking.id,
-                    'customer_name': association.booking.customer.name,
-                    'customer_contact': association.booking.customer.phone,
-                    'check_in_date': association.booking.check_in_date,  # Include check-in date
-                    'probable_check_out_date': association.booking.expected_check_out_date,  # Include check-out date
-                    'duration_of_stay': association.booking.duration_of_stay,  # Include duration of stay
-                    'room_type': room.room_type,  # Include room type
-                    'is_ac': room.is_ac,  # Include AC status
-                    'occupancy': room.occupancy,  # Include occupancy
-                    'payment_details': [
-                        {
-                            'payment_id': payment.id,
-                            'payment_amount': payment.payment_amount,
-                            'payment_date': payment.payment_date
+        # -------------------------------
+        # 3️⃣ Overlap detection (CORE)
+        # -------------------------------
+        for booking in active_bookings:
+            booking_start = booking.check_in_date
+            booking_end = booking.expected_check_out_date or booking.check_out_date
+
+            if not booking_start or not booking_end:
+                continue
+
+            # 🔑 OVERLAP RULE
+            if booking_start < requested_end and booking_end > requested_start:
+                for assoc in booking.room_associations:
+                    room = assoc.room
+                    blocked_room_numbers.add(room.room_number)
+
+                    if room.room_number not in booked_rooms_details:
+                        booked_rooms_details[room.room_number] = {
+                            'room_number': room.room_number,
+                            'room_type': room.room_type,
+                            'is_ac': room.is_ac,
+                            'occupancy': room.occupancy,
+                            'bookings': []
                         }
-                        for payment in association.booking.payments
-                    ],
-                    'booking_status': association.booking.status,
-                    'final_price_per_night': association.booking.final_price_per_night
-                }
-                for association in room.booking_associations
-                if (
-                        association.booking.status in ["Checked-In", "Confirmed"] and
-                        association.booking.check_in_date < target_check_out_date and
-                        (
-                                association.booking.expected_check_out_date is None or
-                                association.booking.expected_check_out_date > target_check_in_date
-                        )
-                )
-            ]
-        }
-        for room in booked_rooms_list
-    ]
 
+                    booked_rooms_details[room.room_number]['bookings'].append({
+                        'booking_id': booking.id,
+                        'customer_name': booking.customer.name,
+                        'customer_contact': booking.customer.phone,
+                        'check_in_date': booking_start,
+                        'expected_check_out_date': booking_end,
+                        'booking_status': booking.status,
+                        'final_price_per_night': booking.final_price_per_night
+                    })
 
-    available_rooms_details = [{'room_number': room.room_number,
-                                'room_type': room.room_type}
-                               for room in unique_available_rooms_list]
+        # -------------------------------
+        # 4️⃣ Available rooms
+        # -------------------------------
+        all_rooms = model_routes.Room.query.all()
 
-    return jsonify({'booked_rooms': booked_rooms_details, 'available_rooms': available_rooms_details}), 200
+        available_rooms = [
+            {
+                'room_number': room.room_number,
+                'room_type': room.room_type,
+                'is_ac': room.is_ac,
+                'occupancy': room.occupancy
+            }
+            for room in all_rooms
+            if room.room_number not in blocked_room_numbers
+        ]
+
+        return jsonify({
+            'requested_window': {
+                'from': requested_start,
+                'to': requested_end
+            },
+            'booked_rooms': list(booked_rooms_details.values()),
+            'available_rooms': available_rooms
+        }), 200
+
+    except Exception as e:
+        print("❌ Room status error:", e)
+        return jsonify({'error': str(e)}), 500
 
 
 @guest_bp.route('/api/get_payment', methods=['GET'])
@@ -1431,10 +1555,18 @@ def bookings_by_date_range():
         booking_ids = [record.booking_id for record in gst_records]
 
         # --- Fetch bookings that match those IDs ---
+        # Create a map: booking_id -> gst_record
+        gst_map = {record.booking_id: record for record in gst_records}
+
         bookings = (
             model_routes.Booking.query
             .filter(model_routes.Booking.id.in_(booking_ids))
             .all()
+        )
+
+        # 🔑 Sort bookings by GST bill number
+        bookings.sort(
+            key=lambda b: gst_map[b.id].gst_bill_no
         )
 
         booking_list = []
