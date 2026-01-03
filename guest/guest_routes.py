@@ -19,6 +19,19 @@ guest_bp = Blueprint(
 # Helpers
 # -------------------------
 
+
+def format_name(name: str) -> str:
+    if not name:
+        return name
+    return " ".join(word.capitalize() for word in name.strip().split())
+
+
+def format_name_upper(name: str) -> str:
+    if not name:
+        return name
+    return " ".join(word.upper() for word in name.strip().split())
+
+
 def booking_active_on_date(b, target_date):
     b_checkin = b.check_in_date.date() if b.check_in_date else None
     b_checkout = b.expected_check_out_date.date() if b.expected_check_out_date else None
@@ -350,8 +363,8 @@ def retrieve_customer():
         existing_customer = model_routes.Customer.query.filter_by(identity=identity).first()
 
     if existing_customer:
-        return jsonify({"name": existing_customer.name,
-                        "address": existing_customer.address,
+        return jsonify({"name": format_name(existing_customer.name),
+                        "address": format_name_upper(existing_customer.address),
                         "email": existing_customer.email,
                         "phone": existing_customer.phone,
                         "identity": existing_customer.identity}), 201
@@ -447,7 +460,6 @@ def create_booking():
     except Exception as e:
         model_routes.db.session.rollback()
         print("Error during booking creation:", str(e))
-        traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
 
@@ -649,10 +661,10 @@ def search_booking():
         'price_per_night': booking.final_price_per_night,
         'total_price': booking.total_price,
         'customer_info': {
-            'name': booking.customer.name,
+            'name': format_name(booking.customer.name),
             'phone': booking.customer.phone,
             'identity': booking.customer.identity,
-            'address': booking.customer.address,
+            'address': format_name(booking.customer.address),
             'email': booking.customer.email,
         },
         'stay_info': {
@@ -689,7 +701,7 @@ def search_booking():
         'gst_info': {
             'gst_bill_no': gst_bill_no,
             'guest_gst_no': guest_gst_no,
-            'guest_company_name': guest_company_name
+            'guest_company_name': format_name_upper(guest_company_name)
         }
     }]
     return jsonify({'bookingDetails': result}), 200
@@ -917,10 +929,10 @@ def check_rooms_dashboard():
                 'price_per_night': booking.final_price_per_night,
                 'total_price': booking.total_price,
                 'customer_info': {
-                    'name': booking.customer.name,
+                    'name': format_name(booking.customer.name),
                     'phone': booking.customer.phone,
                     'identity': booking.customer.identity,
-                    'address': booking.customer.address,
+                    'address': format_name(booking.customer.address),
                     'email': booking.customer.email,
                 },
                 'stay_info': {
@@ -957,7 +969,7 @@ def check_rooms_dashboard():
                 'gst_info': {
                     'gst_bill_no': gst_bill_no,
                     'guest_gst_no': guest_gst_no,
-                    'guest_company_name': guest_company_name
+                    'guest_company_name': format_name_upper(guest_company_name)
                 }
             })
         # 🔹 Available rooms (rooms not in booked_room_numbers)
@@ -1123,7 +1135,7 @@ def check_rooms_status():
 
                     booked_rooms_details[room.room_number]['bookings'].append({
                         'booking_id': booking.id,
-                        'customer_name': booking.customer.name,
+                        'customer_name': format_name(booking.customer.name),
                         'customer_contact': booking.customer.phone,
                         'check_in_date': booking_start,
                         'expected_check_out_date': booking_end,
@@ -1339,7 +1351,7 @@ def get_payments_by_date():
                 "booking_id": booking.id,
                 "booking_status": booking.status,
                 "check_in_date": booking.check_in_date,
-                "customer_name": row.customer_name,
+                "customer_name": format_name(row.customer_name),
                 "contact_number": row.contact_number,
                 "net_pending_amount": round(pending_amount,2),
                 "advance_paid": round(advance_paid, 2),
@@ -1381,7 +1393,7 @@ def get_payments_by_date():
                 "booking_id": row.booking_id,
                 "booking_status": row.booking_status,
                 "check_in_date": row.check_in_date,
-                "customer_name": row.customer_name,
+                "customer_name": format_name(row.customer_name),
                 "contact_number": row.contact_number,
                 "net_pending_amount": abs(row.pending_amount),
                 "advance_paid": round(advance_paid, 2),
@@ -1398,7 +1410,7 @@ def get_payments_by_date():
             "booking_id": row.booking_id,
             "booking_status": row.booking_status,  # Added
             "check_in_date": row.booking_date,
-            "customer_name": row.customer_name,
+            "customer_name": format_name(row.customer_name),
             "contact_number": row.contact_number,
             "payment_mode": row.payment_mode.upper(),
             "amount": row.amount,
@@ -1496,7 +1508,7 @@ def get_payments_by_date():
             if final_payment : #and final_payment.payment_date.date() == start_date:
                 adjusted_payment_details.append({
                     "booking_id": booking.id,
-                    "customer_name": booking.customer.name,
+                    "customer_name": format_name(booking.customer.name),
                     "contact_number": booking.customer.phone,
                     "total_advance": total_advance_before_checkin,
                     "advance_paid_dates": advance_paid_dates,
@@ -1578,10 +1590,10 @@ def bookings_by_date_range():
                 'price_per_night': booking.final_price_per_night,
                 'total_price': booking.total_price,
                 'customer_info': {
-                    'name': booking.customer.name if booking.customer else None,
+                    'name': format_name(booking.customer.name) if booking.customer else None,
                     'phone': booking.customer.phone if booking.customer else None,
                     'identity': booking.customer.identity if booking.customer else None,
-                    'address': booking.customer.address if booking.customer else None,
+                    'address': format_name(booking.customer.address) if booking.customer else None,
                     'email': booking.customer.email if booking.customer else None,
                 },
                 'stay_info': {
@@ -1617,7 +1629,7 @@ def bookings_by_date_range():
                     'gst_bill_no': booking.gst_bill_mapping.gst_bill_no if booking.gst_bill_mapping else None,
                     'guest_gst_no': booking.gst_bill_mapping.guest_gst_no if booking.gst_bill_mapping else None,
                     'gst_bill_date': booking.gst_bill_mapping.gst_bill_date.strftime('%Y-%m-%d') if booking.gst_bill_mapping else None,
-                    'guest_company_name': booking.gst_bill_mapping.guest_company_name if booking.gst_bill_mapping else None,
+                    'guest_company_name': format_name_upper(booking.gst_bill_mapping.guest_company_name) if booking.gst_bill_mapping else None,
                 },
             })
 
