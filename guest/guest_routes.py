@@ -56,7 +56,7 @@ def _date_only(dt):
 def guest_info_from_booking(b):
     if not b or not getattr(b, "customer", None):
         return None, None
-    return getattr(b.customer, "name", None), getattr(b.customer, "phone", None)
+    return format_name(getattr(b.customer, "name", None)), format_name(getattr(b.customer, "phone", None))
 
 
 @guest_bp.route("/api/daily-chart", methods=["GET"])
@@ -317,7 +317,7 @@ def daily_chart():
                 resp["conflict_bookings"] = [
                     {
                         "booking_id": b.id,
-                        "guest_name": b.customer.name if b.customer else None,
+                        "guest_name": format_name(b.customer.name) if b.customer else None,
                         "phone": b.customer.phone if b.customer else None,
                         "status": b.status,
                         "check_in": b.check_in_date,
