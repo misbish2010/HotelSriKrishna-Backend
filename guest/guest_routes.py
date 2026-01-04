@@ -15,9 +15,37 @@ guest_bp = Blueprint(
     template_folder='templates',
     static_folder='static'
 )
+
+
 # -------------------------
 # Helpers
 # -------------------------
+
+def get_payment_summary_for_booking(db, booking_id):
+    Payment = model_routes.Payment
+    Booking = model_routes.Booking
+
+    total_paid = (
+        db.session.query(
+            func.coalesce(func.sum(Payment.payment_amount), 0)
+        )
+        .filter(
+            Payment.booking_id == booking_id,
+            func.lower(Payment.payment_status) == "paid"
+        )
+        .scalar()
+    )
+
+    booking = Booking.query.get(booking_id)
+    total_payable = float(booking.total_price or 0)
+
+    pending = max(total_payable - float(total_paid or 0), 0)
+
+    return {
+        "total_payable": total_payable,
+        "advance_paid": float(total_paid or 0),
+        "pending_amount": pending,
+    }
 
 
 def format_name(name: str) -> str:
@@ -56,7 +84,7 @@ def _date_only(dt):
 def guest_info_from_booking(b):
     if not b or not getattr(b, "customer", None):
         return None, None
-    return format_name(getattr(b.customer, "name", None)), format_name(getattr(b.customer, "phone", None))
+    return format_name_upper(getattr(b.customer, "name", None)), format_name_upper(getattr(b.customer, "phone", None))
 
 
 @guest_bp.route("/api/daily-chart", methods=["GET"])
@@ -172,6 +200,10 @@ def daily_chart():
                 "next_guest_phone": None,
                 "next_check_in_time": None,
                 "current_check_out_time": None,
+                # 💰 Payment summary
+                "total_payable": None,
+                "advance_paid": None,
+                "pending_amount": None,
             }
 
             # Holder variables
@@ -272,7 +304,9 @@ def daily_chart():
 
                 resp["current_check_out_time"] = checkout_today_booking.expected_check_out_date
                 resp["next_check_in_time"] = new_booking_today.check_in_date
-
+                # 💰 Attach payment summary ONLY for checkout-today booking
+                payment_summary = get_payment_summary_for_booking(db, checkout_today_booking.id)
+                resp.update(payment_summary)
 
             # 3) current spanning booking
             elif current_booking:
@@ -304,7 +338,9 @@ def daily_chart():
                 resp["current_guest_name"] = cur_name
                 resp["current_guest_phone"] = cur_phone
                 resp["current_check_out_time"] = checkout_today_booking.expected_check_out_date
-
+                # 💰 Attach payment summary ONLY for checkout-today booking
+                payment_summary = get_payment_summary_for_booking(db, checkout_today_booking.id)
+                resp.update(payment_summary)
 
             else:
                 resp["status"] = "available"
@@ -317,7 +353,7 @@ def daily_chart():
                 resp["conflict_bookings"] = [
                     {
                         "booking_id": b.id,
-                        "guest_name": format_name(b.customer.name) if b.customer else None,
+                        "guest_name": format_name_upper(b.customer.name) if b.customer else None,
                         "phone": b.customer.phone if b.customer else None,
                         "status": b.status,
                         "check_in": b.check_in_date,
@@ -363,7 +399,7 @@ def retrieve_customer():
         existing_customer = model_routes.Customer.query.filter_by(identity=identity).first()
 
     if existing_customer:
-        return jsonify({"name": format_name(existing_customer.name),
+        return jsonify({"name": format_name_upper(existing_customer.name),
                         "address": format_name_upper(existing_customer.address),
                         "email": existing_customer.email,
                         "phone": existing_customer.phone,
@@ -661,10 +697,10 @@ def search_booking():
         'price_per_night': booking.final_price_per_night,
         'total_price': booking.total_price,
         'customer_info': {
-            'name': format_name(booking.customer.name),
+            'name': format_name_upper(booking.customer.name),
             'phone': booking.customer.phone,
             'identity': booking.customer.identity,
-            'address': format_name(booking.customer.address),
+            'address': format_name_upper(booking.customer.address),
             'email': booking.customer.email,
         },
         'stay_info': {
@@ -929,10 +965,10 @@ def check_rooms_dashboard():
                 'price_per_night': booking.final_price_per_night,
                 'total_price': booking.total_price,
                 'customer_info': {
-                    'name': format_name(booking.customer.name),
+                    'name': format_name_upper(booking.customer.name),
                     'phone': booking.customer.phone,
                     'identity': booking.customer.identity,
-                    'address': format_name(booking.customer.address),
+                    'address': format_name_upper(booking.customer.address),
                     'email': booking.customer.email,
                 },
                 'stay_info': {
@@ -1135,7 +1171,7 @@ def check_rooms_status():
 
                     booked_rooms_details[room.room_number]['bookings'].append({
                         'booking_id': booking.id,
-                        'customer_name': format_name(booking.customer.name),
+                        'customer_name': format_name_upper(booking.customer.name),
                         'customer_contact': booking.customer.phone,
                         'check_in_date': booking_start,
                         'expected_check_out_date': booking_end,
@@ -1351,7 +1387,7 @@ def get_payments_by_date():
                 "booking_id": booking.id,
                 "booking_status": booking.status,
                 "check_in_date": booking.check_in_date,
-                "customer_name": format_name(row.customer_name),
+                "customer_name": format_name_upper(row.customer_name),
                 "contact_number": row.contact_number,
                 "net_pending_amount": round(pending_amount,2),
                 "advance_paid": round(advance_paid, 2),
@@ -1393,7 +1429,7 @@ def get_payments_by_date():
                 "booking_id": row.booking_id,
                 "booking_status": row.booking_status,
                 "check_in_date": row.check_in_date,
-                "customer_name": format_name(row.customer_name),
+                "customer_name": format_name_upper(row.customer_name),
                 "contact_number": row.contact_number,
                 "net_pending_amount": abs(row.pending_amount),
                 "advance_paid": round(advance_paid, 2),
@@ -1410,7 +1446,7 @@ def get_payments_by_date():
             "booking_id": row.booking_id,
             "booking_status": row.booking_status,  # Added
             "check_in_date": row.booking_date,
-            "customer_name": format_name(row.customer_name),
+            "customer_name": format_name_upper(row.customer_name),
             "contact_number": row.contact_number,
             "payment_mode": row.payment_mode.upper(),
             "amount": row.amount,
@@ -1434,14 +1470,14 @@ def get_payments_by_date():
     # --------------------
     adjusted_payment_details = []
 
+    adjusted_payment_details = []
+
     all_bookings_with_payments = (
         model_routes.db.session.query(model_routes.Booking)
         .join(model_routes.Payment)
         .filter(
-            func.lower(model_routes.Payment.payment_status).in_(["paid"]),
-            model_routes.Payment.payment_date >= start_of_day,
-            model_routes.Payment.payment_date <= end_of_day,
-            model_routes.Booking.status.in_(["Checked-In", "Checked-Out"])
+            func.lower(model_routes.Payment.payment_status) == "paid",
+            model_routes.Booking.status == "Checked-In"
         )
         .distinct()
         .all()
@@ -1449,9 +1485,12 @@ def get_payments_by_date():
 
     for booking in all_bookings_with_payments:
 
-        # 1️⃣ Advance payments BEFORE check-in
+        # Detect CHECK-IN TODAY
+        if not (start_of_day <= booking.check_in_date <= end_of_day):
+            continue
+
         checkin_start = datetime.combine(
-            booking.check_in_date,
+            booking.check_in_date.date(),
             datetime.min.time()
         )
 
@@ -1459,65 +1498,35 @@ def get_payments_by_date():
             model_routes.db.session.query(model_routes.Payment)
             .filter(
                 model_routes.Payment.booking_id == booking.id,
-                func.lower(model_routes.Payment.payment_status).in_(["paid"]),
+                func.lower(model_routes.Payment.payment_status) == "paid",
                 model_routes.Payment.payment_date < checkin_start
             )
             .order_by(model_routes.Payment.payment_date.asc())
             .all()
         )
-        advance_paid_dates = [
-            pay.payment_date.strftime("%Y-%m-%d")
-            for pay in advance_payments
-            if pay.payment_amount > 0
-        ]
 
         total_advance_before_checkin = sum(
             p.payment_amount for p in advance_payments if p.payment_amount > 0
         )
 
-        # 2️⃣ Payments up to today
-        total_paid_upto_today = (
-            model_routes.db.session.query(
-                func.coalesce(func.abs(func.sum(model_routes.Payment.payment_amount)), 0)
-            )
-            .filter(
-                model_routes.Payment.booking_id == booking.id,
-                func.lower(model_routes.Payment.payment_status).in_(["paid", "discount"]),
-                model_routes.Payment.payment_date <= end_of_day
-            )
-            .scalar()
-        )
+        if total_advance_before_checkin <= 0:
+            continue
 
-
-        # 3️⃣ Detect full adjustment today
-        if (
-                total_advance_before_checkin!=0 and
-                total_advance_before_checkin < booking.total_price and
-                total_paid_upto_today >= booking.total_price
-        ):
-            final_payment = (
-                model_routes.db.session.query(model_routes.Payment)
-                .filter(
-                    model_routes.Payment.booking_id == booking.id,
-                    func.lower(model_routes.Payment.payment_status).in_(["paid"]),
-                    model_routes.Payment.payment_date <= end_of_day
-                )
-                .order_by(model_routes.Payment.payment_date.desc())
-                .first()
-            )
-            if final_payment : #and final_payment.payment_date.date() == start_date:
-                adjusted_payment_details.append({
-                    "booking_id": booking.id,
-                    "customer_name": format_name(booking.customer.name),
-                    "contact_number": booking.customer.phone,
-                    "total_advance": total_advance_before_checkin,
-                    "advance_paid_dates": advance_paid_dates,
-                    "adjusted_on": final_payment.payment_date,
-                    "check_in_date": booking.check_in_date,
-                    "room_numbers": [
-                        br.room.room_number for br in booking.room_associations
-                    ]
-                })
+        adjusted_payment_details.append({
+            "booking_id": booking.id,
+            "customer_name": format_name_upper(booking.customer.name),
+            "contact_number": booking.customer.phone,
+            "total_advance": round(total_advance_before_checkin, 2),
+            "advance_paid_dates": [
+                p.payment_date.strftime("%Y-%m-%d")
+                for p in advance_payments
+            ],
+            "adjusted_on": booking.check_in_date,
+            "check_in_date": booking.check_in_date,
+            "room_numbers": [
+                br.room.room_number for br in booking.room_associations
+            ]
+        })
     return jsonify({
         "payment_details": payment_details,
         "pending_payment_details": pending_payment_details,
@@ -1590,10 +1599,10 @@ def bookings_by_date_range():
                 'price_per_night': booking.final_price_per_night,
                 'total_price': booking.total_price,
                 'customer_info': {
-                    'name': format_name(booking.customer.name) if booking.customer else None,
+                    'name': format_name_upper(booking.customer.name) if booking.customer else None,
                     'phone': booking.customer.phone if booking.customer else None,
                     'identity': booking.customer.identity if booking.customer else None,
-                    'address': format_name(booking.customer.address) if booking.customer else None,
+                    'address': format_name_upper(booking.customer.address) if booking.customer else None,
                     'email': booking.customer.email if booking.customer else None,
                 },
                 'stay_info': {
