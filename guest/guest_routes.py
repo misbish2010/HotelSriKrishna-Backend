@@ -21,6 +21,7 @@ guest_bp = Blueprint(
 # Helpers
 # -------------------------
 
+
 def get_payment_summary_for_booking(db, booking_id):
     Payment = model_routes.Payment
     Booking = model_routes.Booking
@@ -305,8 +306,26 @@ def daily_chart():
                 resp["current_check_out_time"] = checkout_today_booking.expected_check_out_date
                 resp["next_check_in_time"] = new_booking_today.check_in_date
                 # 💰 Attach payment summary ONLY for checkout-today booking
-                payment_summary = get_payment_summary_for_booking(db, checkout_today_booking.id)
-                resp.update(payment_summary)
+                # Determine primary room for payment display (lowest room number)
+                booking_rooms = sorted(
+                    checkout_today_booking.room_associations,
+                    key=lambda br: str(br.room.room_number)
+                )
+
+                primary_room_number = booking_rooms[0].room.room_number if booking_rooms else None
+
+                if room.room_number == primary_room_number:
+                    payment_summary = get_payment_summary_for_booking(
+                        db,
+                        checkout_today_booking.id
+                    )
+                    resp.update(payment_summary)
+                else:
+                    # Explicitly keep empty for other rooms
+                    resp["total_payable"] = None
+                    resp["advance_paid"] = None
+                    resp["pending_amount"] = None
+
 
             # 3) current spanning booking
             elif current_booking:
@@ -339,8 +358,24 @@ def daily_chart():
                 resp["current_guest_phone"] = cur_phone
                 resp["current_check_out_time"] = checkout_today_booking.expected_check_out_date
                 # 💰 Attach payment summary ONLY for checkout-today booking
-                payment_summary = get_payment_summary_for_booking(db, checkout_today_booking.id)
-                resp.update(payment_summary)
+                booking_rooms = sorted(
+                    checkout_today_booking.room_associations,
+                    key=lambda br: str(br.room.room_number)
+                )
+
+                primary_room_number = booking_rooms[0].room.room_number if booking_rooms else None
+
+                if room.room_number == primary_room_number:
+                    payment_summary = get_payment_summary_for_booking(
+                        db,
+                        checkout_today_booking.id
+                    )
+                    resp.update(payment_summary)
+                else:
+                    # Explicitly keep empty for other rooms
+                    resp["total_payable"] = None
+                    resp["advance_paid"] = None
+                    resp["pending_amount"] = None
 
             else:
                 resp["status"] = "available"
