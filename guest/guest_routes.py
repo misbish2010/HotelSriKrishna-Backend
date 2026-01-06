@@ -1346,6 +1346,7 @@ def get_payments_by_date():
             model_routes.Booking.id.label("booking_id"),
             model_routes.Booking.status.label("booking_status"),
             model_routes.Booking.check_in_date,
+            model_routes.Booking.expected_check_out_date.label("checkout_date"),
             model_routes.Customer.name.label("customer_name"),
             model_routes.Customer.phone.label("contact_number"),
             func.group_concat(model_routes.Room.room_number).label("room_numbers"),
@@ -1357,7 +1358,7 @@ def get_payments_by_date():
         .join(model_routes.Room, model_routes.BookingRoom.room_id == model_routes.Room.id)
         .filter(
             model_routes.Booking.status == "Checked-Out",
-            model_routes.Payment.notes == "Pending"
+            func.lower(func.coalesce(model_routes.Payment.notes, "")) == "pending"
         )
         .group_by(model_routes.Booking.id)
         .all()
@@ -1432,6 +1433,12 @@ def get_payments_by_date():
     for row in checked_out_pending:
         booking = model_routes.Booking.query.get(row.booking_id)
 
+        if not booking or not booking.expected_check_out_date:
+            continue
+
+        # -----------------------------
+        # Advance paid (before check-in)
+        # -----------------------------
         checkin_start = datetime.combine(
             booking.check_in_date,
             datetime.min.time()
@@ -1449,29 +1456,45 @@ def get_payments_by_date():
             .scalar()
         )
 
-        agreed_price_per_night = (
+        # -----------------------------
+        # FINAL payable (booking-level)
+        # -----------------------------
+        total_payable = booking.total_price or 0
+
+        # -----------------------------
+        # Paid till CHECKOUT DATE ONLY
+        # -----------------------------
+        total_paid_till_checkout = (
             model_routes.db.session.query(
-                func.coalesce(func.sum(model_routes.BookingRoom.final_price_per_night), 0)
+                func.coalesce(func.sum(model_routes.Payment.payment_amount), 0)
             )
             .filter(
-                model_routes.BookingRoom.booking_id == booking.id
+                model_routes.Payment.booking_id == booking.id,
+                func.lower(model_routes.Payment.payment_status).in_(["paid", "discount"]),
+                model_routes.Payment.payment_date <= booking.expected_check_out_date
             )
             .scalar()
         )
 
-        if abs(row.pending_amount) > 0:
+        net_pending_amount = round(
+            total_payable - total_paid_till_checkout,
+            2
+        )
+
+        if net_pending_amount > 0:
             pending_payment_details.append({
-                "booking_id": row.booking_id,
-                "booking_status": row.booking_status,
-                "check_in_date": row.check_in_date,
+                "booking_id": booking.id,
+                "booking_status": booking.status,
+                "check_in_date": booking.check_in_date,
                 "customer_name": format_name_upper(row.customer_name),
                 "contact_number": row.contact_number,
-                "net_pending_amount": abs(row.pending_amount),
+                "net_pending_amount": net_pending_amount,
                 "advance_paid": round(advance_paid, 2),
-                "agreed_price_per_night": round(agreed_price_per_night, 2),
+                "total_payable": round(total_payable, 2),
                 "note": "Pending",
                 "room_numbers": row.room_numbers.split(",")
             })
+
 
     # --------------------
     # Format for JSON
