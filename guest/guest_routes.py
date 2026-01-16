@@ -1320,6 +1320,7 @@ def get_payments_by_date():
             model_routes.Customer.phone,
             payment_subq.c.payment_mode
         )
+        .order_by(func.min(model_routes.Room.room_number))
         .all()
     )
 
@@ -1338,6 +1339,7 @@ def get_payments_by_date():
         .join(model_routes.Room, model_routes.BookingRoom.room_id == model_routes.Room.id)
         .filter(model_routes.Booking.status.in_(["Checked-In"]))
         .group_by(model_routes.Booking.id)
+        .order_by(func.min(model_routes.Room.room_number))
         .all()
     )
 
@@ -1361,6 +1363,7 @@ def get_payments_by_date():
             func.lower(func.coalesce(model_routes.Payment.notes, "")) == "pending"
         )
         .group_by(model_routes.Booking.id)
+        .order_by(func.min(model_routes.Room.room_number))
         .all()
     )
     today = datetime.utcnow().date()
