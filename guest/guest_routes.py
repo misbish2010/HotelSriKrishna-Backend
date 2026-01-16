@@ -944,6 +944,19 @@ def get_or_create_invoice(booking_id):
     }), 200
 
 
+@guest_bp.route("/api/bookings/<int:booking_id>/gst-invoice", methods=["DELETE"])
+def delete_gst_invoice(booking_id):
+    invoice = model_routes.GSTBillMapping.query.filter_by(booking_id=booking_id).first()
+
+    if not invoice:
+        return jsonify({"message": "No GST invoice found for this booking"}), 404
+
+    model_routes.db.session.delete(invoice)
+    model_routes.db.session.commit()
+
+    return jsonify({"message": "GST invoice deleted successfully"}), 200
+
+
 # ✅ Room Dashboard API with Full Booking Details
 @guest_bp.route('/api/room/dashboard', methods=['GET'])
 def check_rooms_dashboard():
