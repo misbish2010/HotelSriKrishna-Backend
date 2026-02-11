@@ -988,8 +988,9 @@ def check_rooms_dashboard():
         bookings = model_routes.Booking.query.filter(
             model_routes.Booking.check_in_date < range_end,
             model_routes.Booking.expected_check_out_date > range_start
+        ).order_by(
+            model_routes.Booking.expected_check_out_date.asc()
         ).all()
-        print(bookings)
 
         booking_details = []
         booked_room_numbers = set()
