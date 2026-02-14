@@ -1552,7 +1552,8 @@ def get_payments_by_date():
         .join(model_routes.Payment)
         .filter(
             func.lower(model_routes.Payment.payment_status) == "paid",
-            model_routes.Booking.status == "Checked-In"
+            model_routes.Booking.check_in_date >= start_of_day,
+            model_routes.Booking.check_in_date <= end_of_day
         )
         .distinct()
         .all()
@@ -1592,8 +1593,12 @@ def get_payments_by_date():
             "customer_name": format_name_upper(booking.customer.name),
             "contact_number": booking.customer.phone,
             "total_advance": round(total_advance_before_checkin, 2),
-            "advance_paid_dates": [
-                p.payment_date.strftime("%Y-%m-%d")
+            "advance_payments": [
+                {
+                    "mode": p.payment_mode,
+                    "amount": p.payment_amount,
+                    "date": p.payment_date.strftime("%Y-%m-%d")
+                }
                 for p in advance_payments
             ],
             "adjusted_on": booking.check_in_date,
