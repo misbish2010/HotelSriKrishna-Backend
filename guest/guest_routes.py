@@ -118,12 +118,15 @@ def daily_chart():
         # Load all rooms and dedupe by room_number
         # ---------------------------------------------------------
         all_rooms = Room.query.order_by(Room.room_number.asc()).all()
+        print("ALL_ROOMS")
+        print(all_rooms)
         unique_rooms_by_number = {}
         for r in all_rooms:
             if r.room_number not in unique_rooms_by_number:
                 unique_rooms_by_number[r.room_number] = r
         rooms_list = list(unique_rooms_by_number.values())
-
+        print("ROOM_LIST")
+        print(rooms_list)
         # ---------------------------------------------------------
         # Query BookingRoom rows for bookings that overlap the target date
         # Condition (date-only):
@@ -148,11 +151,16 @@ def daily_chart():
                 )
             .all()
         )
+        print("overlapping_br_rows : ")
+        print(overlapping_br_rows)
 
         # Map room_id -> list of bookings (overlapping)
         overlapping_by_room = {}
         for br in overlapping_br_rows:
             overlapping_by_room.setdefault(br.room_id, []).append(br.booking)
+
+        print("overlapping_by_room :")
+        print(overlapping_by_room)
         # Also fetch bookings that START exactly on target_date (to ensure we catch new bookings)
         starting_today_br_rows = (
             db.session.query(BookingRoom)
@@ -166,9 +174,14 @@ def daily_chart():
             )
             .all()
         )
+        print("starting_today_br_rows :")
+        print(starting_today_br_rows)
+
         starting_today_by_room = {}
         for br in starting_today_br_rows:
             starting_today_by_room.setdefault(br.room_id, []).append(br.booking)
+        print("starting_today_by_room:")
+        print(starting_today_by_room)
         rooms_resp = []
 
         # ---------------------------------------------------------
@@ -188,7 +201,7 @@ def daily_chart():
             # dedupe bookings by id (same booking might be linked to multiple variants)
             overlapping_bookings = list({b.id: b for b in overlapping_bookings}.values())
             starting_today_bookings = list({b.id: b for b in starting_today_bookings}.values())
-
+            print(overlapping_bookings)
             # Initialize response object
             resp = {
                 "room_number": room.room_number,
@@ -210,68 +223,86 @@ def daily_chart():
             # Holder variables
             # booking that covers the day (strict: checkin < target_date < checkout)
             current_booking = None
+            # booking that has same data check in and check out y (strict: checkin = target_date = checkout)
+            same_day_booking = None
+            # booking that has same data check in and check out y (strict: checkin = target_date = checkout) and status = Checkout
+            same_day_booking_completed = None
             # booking that has check_in == target_date and status == Checked-In
             checked_in_today_booking = None
             # booking that has check_in == target_date and status == Confirmed
             new_booking_today = None
+            # booking whose checkout (expected or computed) == target_date and Status = Checked OUT
+            checkout_today_booking_completed = None
             # booking whose checkout (expected or computed) == target_date
             checkout_today_booking = None
             active_bookings = []
 
-
             # Evaluate overlapping bookings
             for b in overlapping_bookings:
+                status_norm = (b.status or "").strip().lower()
+                print(b)
+                print(status_norm)
                 b_checkin = _date_only(b.check_in_date)
                 b_checkout = _date_only(b.expected_check_out_date)
+
                 if booking_active_on_date(b, target_date):
                     active_bookings.append(b)
-                if b_checkout is None:
-                    # compute checkout from duration_of_stay if available
-                    if getattr(b, "duration_of_stay", None) is not None:
-                        b_checkout = (b.check_in_date + timedelta(days=b.duration_of_stay)).date()
-                    else:
-                        b_checkout = None
-                status_norm = (b.status or "").strip().lower()
 
-                # starts today?
+                # SAME-DAY booking → isolate
+                if b_checkin == target_date == b_checkout:
+                    print("1")
+                    if status_norm == "checked-out":
+                        same_day_booking_completed = same_day_booking_completed or b
+                    else:
+                        same_day_booking = same_day_booking or b
+                    continue
+                # Spanning booking
+                if (
+                        status_norm != "checked-out"
+                        and b_checkin
+                        and b_checkout
+                        and b_checkin < target_date < b_checkout
+                ):
+                    print(2)
+                    current_booking = b
+                    continue
+                if (
+                        status_norm == "checked-out"
+                        and b_checkin
+                        and b_checkout
+                        and b_checkin < target_date < b_checkout
+                ):
+                    print(3)
+                    current_booking = b
+                    continue
+                if (
+                        status_norm == "checked-out"
+                        and b_checkin
+                        and b_checkout
+                        and b_checkin == target_date < b_checkout
+                ):
+                    print(3)
+                    checked_in_today_booking = checked_in_today_booking or b
+                    continue
+                # Starts today
                 if b_checkin == target_date:
+                    print(4)
                     if status_norm == "checked-in":
                         checked_in_today_booking = checked_in_today_booking or b
-
-                    elif status_norm == "checked-out":
-                        checked_in_today_booking = checked_in_today_booking or b
-
                     elif status_norm == "confirmed":
-                        # if multiple new bookings today, pick earliest check_in datetime (if needed)
-                        if not new_booking_today:
+                        if not new_booking_today or b.check_in_date < new_booking_today.check_in_date:
                             new_booking_today = b
-                        else:
-                            if getattr(b, "check_in_date", None) and getattr(new_booking_today, "check_in_date", None):
-                                if b.check_in_date < new_booking_today.check_in_date:
-                                    new_booking_today = b
+                    continue
 
-                # ends today?
-                if b_checkout == target_date and not booking_active_on_date(b, target_date):
-                    checkout_today_booking = checkout_today_booking or b
+                # Ends today
+                if b_checkout == target_date:
+                    print(5)
+                    if status_norm == "checked-out":
+                        checkout_today_booking_completed = checkout_today_booking_completed or b
 
-                # covers the day? **STRICT**: checkin < target_date < checkout
-                if b_checkin is not None and b_checkout is not None:
-
-                    if (b_checkin < target_date) and (b_checkout > target_date):
-                        # Prefer Checked-In bookings over Confirmed when selecting current_booking
-                        if not current_booking:
-                            current_booking = b
-                        else:
-                            if (current_booking.status or "").strip().lower() != "checked-in" and status_norm == "checked-in":
-                                current_booking = b
-
-            # Also include bookings that were explicitly found in starting_today query (defensive)
-            for b in starting_today_bookings:
-                status_norm = (b.status or "").strip().lower()
-                if status_norm == "checked-in":
-                    checked_in_today_booking = checked_in_today_booking or b
-                elif status_norm == "confirmed":
-                    new_booking_today = new_booking_today or b
+                    if not booking_active_on_date(b, target_date):
+                        checkout_today_booking = checkout_today_booking or b
+                    continue
 
             # -------------------------
             # Decision priority (executed exactly in this order):
@@ -283,15 +314,75 @@ def daily_chart():
             # 6) else available
             # -------------------------
 
-            # 1) checked_in today
-            if checked_in_today_booking:
-                resp["status"] = "checked_in"
-                cur_name, cur_phone = guest_info_from_booking(checked_in_today_booking)
+            # 1) SAME DAY booking (checkin == checkout == today)
+            if same_day_booking and new_booking_today and same_day_booking.id != new_booking_today.id:
+                resp["status"] = "checkout_to_new_booking"
+
+                cur_name, cur_phone = guest_info_from_booking(same_day_booking)
+                nxt_name, nxt_phone = guest_info_from_booking(new_booking_today)
+
                 resp["current_guest_name"] = cur_name
                 resp["current_guest_phone"] = cur_phone
+                resp["next_guest_name"] = nxt_name
+                resp["next_guest_phone"] = nxt_phone
 
+                resp["current_check_out_time"] = same_day_booking.expected_check_out_date
+                resp["next_check_in_time"] = new_booking_today.check_in_date
 
-            # 2) checkout today + new booking today
+            elif same_day_booking:
+                resp["status"] = "checkout_available"
+
+                cur_name, cur_phone = guest_info_from_booking(same_day_booking)
+                resp["current_guest_name"] = cur_name
+                resp["current_guest_phone"] = cur_phone
+                resp["current_check_out_time"] = same_day_booking.expected_check_out_date
+
+            elif same_day_booking_completed and new_booking_today and same_day_booking_completed.id != new_booking_today.id:
+                resp["status"] = "checkout_completed_to_new_booking"
+
+                cur_name, cur_phone = guest_info_from_booking(same_day_booking_completed)
+                nxt_name, nxt_phone = guest_info_from_booking(new_booking_today)
+
+                resp["current_guest_name"] = cur_name
+                resp["current_guest_phone"] = cur_phone
+                resp["next_guest_name"] = nxt_name
+                resp["next_guest_phone"] = nxt_phone
+
+                resp["current_check_out_time"] = same_day_booking_completed.expected_check_out_date
+                resp["next_check_in_time"] = new_booking_today.check_in_date
+
+            elif same_day_booking_completed:
+                resp["status"] = "checkout_completed_available"
+
+                cur_name, cur_phone = guest_info_from_booking(same_day_booking_completed)
+                resp["current_guest_name"] = cur_name
+                resp["current_guest_phone"] = cur_phone
+                resp["current_check_out_time"] = same_day_booking_completed.expected_check_out_date
+
+            elif checkout_today_booking_completed and new_booking_today and checkout_today_booking_completed.id != new_booking_today.id:
+                resp["status"] = "checkout_completed_to_new_booking"
+
+                cur_name, cur_phone = guest_info_from_booking(checkout_today_booking_completed)
+                nxt_name, nxt_phone = guest_info_from_booking(new_booking_today)
+
+                resp["current_guest_name"] = cur_name
+                resp["current_guest_phone"] = cur_phone
+                resp["next_guest_name"] = nxt_name
+                resp["next_guest_phone"] = nxt_phone
+
+                resp["current_check_out_time"] = checkout_today_booking_completed.expected_check_out_date
+                resp["next_check_in_time"] = new_booking_today.check_in_date
+
+            # 2) completed checkout today
+            elif checkout_today_booking_completed:
+                resp["status"] = "checkout_available"
+
+                cur_name, cur_phone = guest_info_from_booking(checkout_today_booking_completed)
+                resp["current_guest_name"] = cur_name
+                resp["current_guest_phone"] = cur_phone
+                resp["current_check_out_time"] = checkout_today_booking_completed.expected_check_out_date
+
+            # 3) checkout today + new booking
             elif checkout_today_booking and new_booking_today and checkout_today_booking.id != new_booking_today.id:
                 resp["status"] = "checkout_to_new_booking"
 
@@ -305,31 +396,20 @@ def daily_chart():
 
                 resp["current_check_out_time"] = checkout_today_booking.expected_check_out_date
                 resp["next_check_in_time"] = new_booking_today.check_in_date
-                # 💰 Attach payment summary ONLY for checkout-today booking
-                # Determine primary room for payment display (lowest room number)
-                booking_rooms = sorted(
-                    checkout_today_booking.room_associations,
-                    key=lambda br: str(br.room.room_number)
-                )
 
-                primary_room_number = booking_rooms[0].room.room_number if booking_rooms else None
+            # 4) checked-in today
+            elif checked_in_today_booking:
+                resp["status"] = "checked_in"
 
-                if room.room_number == primary_room_number:
-                    payment_summary = get_payment_summary_for_booking(
-                        db,
-                        checkout_today_booking.id
-                    )
-                    resp.update(payment_summary)
-                else:
-                    # Explicitly keep empty for other rooms
-                    resp["total_payable"] = None
-                    resp["advance_paid"] = None
-                    resp["pending_amount"] = None
+                cur_name, cur_phone = guest_info_from_booking(checked_in_today_booking)
+                resp["current_guest_name"] = cur_name
+                resp["current_guest_phone"] = cur_phone
 
-
-            # 3) current spanning booking
+            # 5) continuing booking
             elif current_booking:
                 if (current_booking.status or "").lower() == "checked-in":
+                    resp["status"] = "continue_checked_in"
+                elif (current_booking.status or "").lower() == "checked-out":
                     resp["status"] = "continue_checked_in"
                 else:
                     resp["status"] = "continue_confirmed"
@@ -338,8 +418,7 @@ def daily_chart():
                 resp["current_guest_name"] = cur_name
                 resp["current_guest_phone"] = cur_phone
 
-
-            # 4) new booking today (not checked-in)
+            # 6) new booking
             elif new_booking_today:
                 resp["status"] = "new_booking"
 
@@ -348,8 +427,7 @@ def daily_chart():
                 resp["next_guest_phone"] = nxt_phone
                 resp["next_check_in_time"] = new_booking_today.check_in_date
 
-
-            # 5) checkout today and no new booking
+            # 7) checkout only
             elif checkout_today_booking:
                 resp["status"] = "checkout_available"
 
@@ -357,25 +435,6 @@ def daily_chart():
                 resp["current_guest_name"] = cur_name
                 resp["current_guest_phone"] = cur_phone
                 resp["current_check_out_time"] = checkout_today_booking.expected_check_out_date
-                # 💰 Attach payment summary ONLY for checkout-today booking
-                booking_rooms = sorted(
-                    checkout_today_booking.room_associations,
-                    key=lambda br: str(br.room.room_number)
-                )
-
-                primary_room_number = booking_rooms[0].room.room_number if booking_rooms else None
-
-                if room.room_number == primary_room_number:
-                    payment_summary = get_payment_summary_for_booking(
-                        db,
-                        checkout_today_booking.id
-                    )
-                    resp.update(payment_summary)
-                else:
-                    # Explicitly keep empty for other rooms
-                    resp["total_payable"] = None
-                    resp["advance_paid"] = None
-                    resp["pending_amount"] = None
 
             else:
                 resp["status"] = "available"
@@ -1752,4 +1811,3 @@ def add_expense():
     model_routes.db.session.commit()
 
     return jsonify({'message': 'New Expense Record created successfully'}), 201
-
