@@ -296,11 +296,9 @@ def daily_chart():
 
                 # Ends today
                 if b_checkout == target_date:
-                    print(5)
                     if status_norm == "checked-out":
                         checkout_today_booking_completed = checkout_today_booking_completed or b
-
-                    if not booking_active_on_date(b, target_date):
+                    else:
                         checkout_today_booking = checkout_today_booking or b
                     continue
 
