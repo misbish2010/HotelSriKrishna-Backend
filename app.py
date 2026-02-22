@@ -11,6 +11,14 @@ def create_app():
     app = Flask(__name__, instance_relative_config=False)
     #app.config['SERVER_NAME'] = 'hotelsrikrishna:8000'
     CORS(app)
+    CORS(app, resources={
+        r"/api/*": {
+            "origins": "http://localhost:3000",
+            "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"],
+            "supports_credentials": True
+        }
+    })
     app.config.from_object('config.Config')
     app._static_folder = 'admin/static'
 
@@ -37,4 +45,6 @@ def create_app():
 application = create_app()
 
 if __name__ == "__main__":
-    application.run(debug=True)
+    #application.run(debug=True)
+    application.run(host="0.0.0.0", port=5000, debug=True)
+
