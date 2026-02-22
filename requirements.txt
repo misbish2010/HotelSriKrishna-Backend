@@ -8,3 +8,4 @@ pywhatkit
 phonenumbers
 pytz
 tzdata
+gunicorn
