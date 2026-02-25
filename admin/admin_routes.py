@@ -256,6 +256,35 @@ def delete_room(room_id):
     return jsonify({'message': f'Room {room.room_number} config deleted'}), 200
 
 
+@admin_bp.route('/api/delete_room_by_number/<room_number>', methods=['DELETE'])
+@admin_required
+def delete_room_by_number(room_number):
+    """Delete all config rows for a room number e.g. DELETE /api/delete_room_by_number/000"""
+    rooms = model_routes.Room.query.filter_by(room_number=room_number).all()
+    if not rooms:
+        return jsonify({'error': f'Room {room_number} not found'}), 404
+
+    deleted = 0
+    skipped = 0
+    for room in rooms:
+        has_bookings = model_routes.BookingRoom.query.filter_by(room_id=room.id).first()
+        if has_bookings:
+            skipped += 1
+            continue
+        model_routes.db.session.delete(room)
+        deleted += 1
+
+    model_routes.db.session.commit()
+
+    if skipped:
+        return jsonify({
+            'message': f'Deleted {deleted} config(s) for room {room_number}. '
+                       f'Skipped {skipped} — they have booking history.'
+        }), 200
+
+    return jsonify({'message': f'All {deleted} config(s) for room {room_number} deleted'}), 200
+
+
 @admin_bp.route('/api/convert_to_ac_room', methods=['PUT'])
 @admin_required
 def convert_to_ac_room():
