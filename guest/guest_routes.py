@@ -355,13 +355,22 @@ def daily_chart():
 
             # 0) HIGHEST PRIORITY: someone already checked in today
             #    A live guest in the room always wins over any completed checkout record
+            # 0) HIGHEST PRIORITY: someone checked in today
             if checked_in_today_booking:
                 resp["status"] = "checked_in"
                 cur_name, cur_phone = guest_info_from_booking(checked_in_today_booking)
                 resp.update(current_guest_name=cur_name, current_guest_phone=cur_phone)
                 _log_decision(room.room_number, resp["status"], {"current": cur_name})
 
-            # 1) Same-day + new booking arriving (checkout still pending)
+            # 1) SECOND PRIORITY: continuing stay (checked in before today, still here)
+            #    Must be above all _completed branches — live guest always wins
+            elif current_booking and (current_booking.status or "").lower() == "checked-in":
+                resp["status"] = "continue_checked_in"
+                cur_name, cur_phone = guest_info_from_booking(current_booking)
+                resp.update(current_guest_name=cur_name, current_guest_phone=cur_phone)
+                _log_decision(room.room_number, resp["status"], {"current": cur_name})
+
+            # 2) Same-day + new booking arriving (checkout still pending)
             elif same_day_booking and new_booking_today and same_day_booking.id != new_booking_today.id:
                 resp["status"] = "checkout_to_new_booking"
                 cur_name, cur_phone = guest_info_from_booking(same_day_booking)
@@ -370,20 +379,20 @@ def daily_chart():
                             next_guest_name=nxt_name, next_guest_phone=nxt_phone,
                             current_check_out_time=same_day_booking.expected_check_out_date,
                             next_check_in_time=new_booking_today.check_in_date)
-                attach_payment(same_day_booking)  # ✅ pending checkout
+                attach_payment(same_day_booking)
                 _log_decision(room.room_number, resp["status"],
                               {"current": cur_name, "next": nxt_name})
 
-            # 2) Same-day only (checkout still pending)
+            # 3) Same-day only (checkout still pending)
             elif same_day_booking:
                 resp["status"] = "checkout_available"
                 cur_name, cur_phone = guest_info_from_booking(same_day_booking)
                 resp.update(current_guest_name=cur_name, current_guest_phone=cur_phone,
                             current_check_out_time=same_day_booking.expected_check_out_date)
-                attach_payment(same_day_booking)  # ✅ pending checkout
+                attach_payment(same_day_booking)
                 _log_decision(room.room_number, resp["status"], {"current": cur_name})
 
-            # 3) Same-day already Checked-Out + new booking
+            # 4) Same-day already Checked-Out + new booking
             elif same_day_booking_completed and new_booking_today and same_day_booking_completed.id != new_booking_today.id:
                 resp["status"] = "checkout_completed_to_new_booking"
                 cur_name, cur_phone = guest_info_from_booking(same_day_booking_completed)
@@ -392,20 +401,18 @@ def daily_chart():
                             next_guest_name=nxt_name, next_guest_phone=nxt_phone,
                             current_check_out_time=same_day_booking_completed.expected_check_out_date,
                             next_check_in_time=new_booking_today.check_in_date)
-                # ❌ already Checked-Out — skip payment
                 _log_decision(room.room_number, resp["status"],
                               {"current": cur_name, "next": nxt_name})
 
-            # 4) Same-day already Checked-Out, room free
+            # 5) Same-day already Checked-Out, room free
             elif same_day_booking_completed:
                 resp["status"] = "checkout_completed_available"
                 cur_name, cur_phone = guest_info_from_booking(same_day_booking_completed)
                 resp.update(current_guest_name=cur_name, current_guest_phone=cur_phone,
                             current_check_out_time=same_day_booking_completed.expected_check_out_date)
-                # ❌ already Checked-Out — skip payment
                 _log_decision(room.room_number, resp["status"], {"current": cur_name})
 
-            # 5) Checkout already done (Checked-Out) + new booking arriving
+            # 6) Checkout already done (Checked-Out) + new booking arriving
             elif checkout_today_booking_completed and new_booking_today and checkout_today_booking_completed.id != new_booking_today.id:
                 resp["status"] = "checkout_completed_to_new_booking"
                 cur_name, cur_phone = guest_info_from_booking(checkout_today_booking_completed)
@@ -414,20 +421,18 @@ def daily_chart():
                             next_guest_name=nxt_name, next_guest_phone=nxt_phone,
                             current_check_out_time=checkout_today_booking_completed.expected_check_out_date,
                             next_check_in_time=new_booking_today.check_in_date)
-                # ❌ already Checked-Out — skip payment
                 _log_decision(room.room_number, resp["status"],
                               {"current": cur_name, "next": nxt_name})
 
-            # 6) Checkout already done (Checked-Out), room free
+            # 7) Checkout already done (Checked-Out), room free
             elif checkout_today_booking_completed:
                 resp["status"] = "checkout_completed_available"
                 cur_name, cur_phone = guest_info_from_booking(checkout_today_booking_completed)
                 resp.update(current_guest_name=cur_name, current_guest_phone=cur_phone,
                             current_check_out_time=checkout_today_booking_completed.expected_check_out_date)
-                # ❌ already Checked-Out — skip payment
                 _log_decision(room.room_number, resp["status"], {"current": cur_name})
 
-            # 7) Checkout pending today + new booking arriving
+            # 8) Checkout pending today + new booking arriving
             elif checkout_today_booking and new_booking_today and checkout_today_booking.id != new_booking_today.id:
                 resp["status"] = "checkout_to_new_booking"
                 cur_name, cur_phone = guest_info_from_booking(checkout_today_booking)
@@ -436,38 +441,35 @@ def daily_chart():
                             next_guest_name=nxt_name, next_guest_phone=nxt_phone,
                             current_check_out_time=checkout_today_booking.expected_check_out_date,
                             next_check_in_time=new_booking_today.check_in_date)
-                attach_payment(checkout_today_booking)  # ✅ pending checkout
+                attach_payment(checkout_today_booking)
                 _log_decision(room.room_number, resp["status"],
                               {"current": cur_name, "next": nxt_name})
 
-            # 8) Continuing stay (mid-booking, not checking out today)
+            # 9) Continuing stay — confirmed but not checked in yet
             elif current_booking:
-                status_lower = (current_booking.status or "").lower()
-                resp["status"] = "continue_checked_in" if status_lower in ("checked-in", "checked-out") else "continue_confirmed"
+                resp["status"] = "continue_confirmed"
                 cur_name, cur_phone = guest_info_from_booking(current_booking)
                 resp.update(current_guest_name=cur_name, current_guest_phone=cur_phone)
-                # ❌ not checking out today — no payment
                 _log_decision(room.room_number, resp["status"], {"current": cur_name})
 
-            # 9) New booking arriving today (room currently empty)
+            # 10) New booking arriving today (room currently empty)
             elif new_booking_today:
                 resp["status"] = "new_booking"
                 nxt_name, nxt_phone = guest_info_from_booking(new_booking_today)
                 resp.update(next_guest_name=nxt_name, next_guest_phone=nxt_phone,
                             next_check_in_time=new_booking_today.check_in_date)
-                # ❌ no current guest — no payment
                 _log_decision(room.room_number, resp["status"], {"next": nxt_name})
 
-            # 10) Checkout pending today, no incoming guest
+            # 11) Checkout pending today, no incoming guest
             elif checkout_today_booking:
                 resp["status"] = "checkout_available"
                 cur_name, cur_phone = guest_info_from_booking(checkout_today_booking)
                 resp.update(current_guest_name=cur_name, current_guest_phone=cur_phone,
                             current_check_out_time=checkout_today_booking.expected_check_out_date)
-                attach_payment(checkout_today_booking)  # ✅ pending checkout
+                attach_payment(checkout_today_booking)
                 _log_decision(room.room_number, resp["status"], {"current": cur_name})
 
-            # 11) Truly available
+            # 12) Truly available
             else:
                 resp["status"] = "available"
                 _log_decision(room.room_number, "available")
