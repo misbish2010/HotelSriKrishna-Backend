@@ -994,12 +994,12 @@ def get_or_create_invoice(booking_id):
     if not booking.expected_check_out_date:
         return jsonify({"message": "Checkout date not available"}), 400
 
-    invoice_date = booking.expected_check_out_date  # 🔑 KEY CHANGE
+    invoice_date = booking.expected_check_out_date.date()  # 🔑 KEY CHANGE
 
     # 3️⃣ Financial year calculation
     fy_start = invoice_date.year if invoice_date.month >= 4 else invoice_date.year - 1
     fy_end = fy_start + 1
-    fiscal_year = f"{fy_start}-{str(fy_end)[-2:]}"  # 2025-26
+    fiscal_year = f"{str(fy_start)[-2:]}-{str(fy_end)[-2:]}" #25-26
 
     month = f"{invoice_date.month:02d}"
 
@@ -1737,7 +1737,10 @@ def bookings_by_date_range():
         # --- Query GST mapping in date range ---
         gst_records = (
             model_routes.GSTBillMapping.query
-            .filter(model_routes.GSTBillMapping.gst_bill_date.between(start_date, end_date))
+            .filter(
+                model_routes.GSTBillMapping.gst_bill_date >= start_date.date(),
+                model_routes.GSTBillMapping.gst_bill_date <= end_date.date()
+            )
             .order_by(model_routes.GSTBillMapping.gst_bill_no.asc())
             .all()
         )
