@@ -1168,97 +1168,6 @@ def check_rooms_dashboard():
         return jsonify({'error': str(e)}), 500
 
 
-# @guest_bp.route('/api/room/status', methods=['GET'])
-# def check_rooms_status():
-#     duration_window = int(request.args.get('booking_window'))
-#     target_check_in_date = datetime.strptime(request.args.get('checkInDateTime'), '%Y-%m-%dT%H:%M:%S.%fZ')
-#     target_check_out_date = target_check_in_date + timedelta(hours=duration_window)
-#
-#     # Step 1: Get all active bookings
-#     active_bookings = model_routes.Booking.query.filter(
-#         model_routes.Booking.status.in_(["Confirmed", "Checked-In"])
-#     ).all()
-#
-#
-#     booked_rooms = set()  # A set of tuples (room, room_number)
-#     for booking in active_bookings:
-#         # Calculate the actual check-out date (expected or actual)
-#         calculated_check_out_date = (
-#             booking.check_in_date + timedelta(days=booking.duration_of_stay)
-#             if booking.duration_of_stay else None
-#         )
-#         # Check if the booking overlaps with the target date range
-#         if (
-#                 booking.check_in_date < target_check_out_date and
-#                 calculated_check_out_date > target_check_in_date
-#         ):
-#             # Add associated room IDs and room numbers to the booked list
-#             for room_association in booking.room_associations:
-#                 # Fetch room details (assuming room_association.room provides access to room object)
-#                 room = room_association.room  # Replace with the correct property or query if needed
-#                 booked_rooms.add((room.id, room.room_number))  # Collect both ID and number
-#     # Step 4: Fetch all rooms with matching room numbers
-#     # Extract room numbers from the booked_rooms set
-#     booked_room_numbers = [room_number for _, room_number in booked_rooms]
-#     booked_room_ids = [room_id for room_id, _ in booked_rooms]
-#     all_rooms = model_routes.Room.query.all()
-#     booked_rooms_list = [room for room in all_rooms if room.id in booked_room_ids]
-#     available_rooms_list = [room for room in all_rooms if room.room_number not in booked_room_numbers]
-#
-#     unique_available_rooms = {}
-#     for room in available_rooms_list:
-#         if room.room_number not in booked_room_numbers:
-#             unique_available_rooms[room.room_number] = room
-#
-#     # Get the unique available rooms
-#     unique_available_rooms_list = list(unique_available_rooms.values())
-#     booked_rooms_details = [
-#         {
-#             'room_number': room.room_number,
-#             'bookings': [
-#                 {
-#                     'booking_id': association.booking.id,
-#                     'customer_name': association.booking.customer.name,
-#                     'customer_contact': association.booking.customer.phone,
-#                     'check_in_date': association.booking.check_in_date,  # Include check-in date
-#                     'probable_check_out_date': association.booking.expected_check_out_date,  # Include check-out date
-#                     'duration_of_stay': association.booking.duration_of_stay,  # Include duration of stay
-#                     'room_type': room.room_type,  # Include room type
-#                     'is_ac': room.is_ac,  # Include AC status
-#                     'occupancy': room.occupancy,  # Include occupancy
-#                     'payment_details': [
-#                         {
-#                             'payment_id': payment.id,
-#                             'payment_amount': payment.payment_amount,
-#                             'payment_date': payment.payment_date
-#                         }
-#                         for payment in association.booking.payments
-#                     ],
-#                     'booking_status': association.booking.status,
-#                     'final_price_per_night': association.booking.final_price_per_night
-#                 }
-#                 for association in room.booking_associations
-#                 if (
-#                         association.booking.status in ["Checked-In", "Confirmed"] and
-#                         association.booking.check_in_date < target_check_out_date and
-#                         (
-#                                 association.booking.expected_check_out_date is None or
-#                                 association.booking.expected_check_out_date > target_check_in_date
-#                         )
-#                 )
-#             ]
-#         }
-#         for room in booked_rooms_list
-#     ]
-#
-#
-#     available_rooms_details = [{'room_number': room.room_number,
-#                                 'room_type': room.room_type}
-#                                for room in unique_available_rooms_list]
-#
-#     return jsonify({'booked_rooms': booked_rooms_details, 'available_rooms': available_rooms_details}), 200
-
-
 @guest_bp.route('/api/room/status', methods=['GET'])
 def check_rooms_status():
     try:
@@ -1391,6 +1300,7 @@ def get_payments_by_date():
         model_routes.db.session.query(
             model_routes.Payment.booking_id.label('booking_id'),
             model_routes.Payment.payment_mode.label('payment_mode'),
+            model_routes.Payment.payment_status.label('payment_status'),
             func.sum(model_routes.Payment.payment_amount).label('amount'),
             func.max(model_routes.Payment.payment_date).label('payment_date')
         )
@@ -1399,7 +1309,11 @@ def get_payments_by_date():
             ~func.lower(model_routes.Payment.payment_status).in_(["discount", "pending"]),
             ~func.lower(model_routes.Payment.notes).in_(["Pending"])
         )
-        .group_by(model_routes.Payment.booking_id, model_routes.Payment.payment_mode)
+        .group_by(
+            model_routes.Payment.booking_id,
+            model_routes.Payment.payment_mode,
+            model_routes.Payment.payment_status
+        )
         .subquery()
     )
 
@@ -1411,6 +1325,7 @@ def get_payments_by_date():
             model_routes.Customer.name.label('customer_name'),
             model_routes.Customer.phone.label('contact_number'),
             payment_subq.c.payment_mode,
+            payment_subq.c.payment_status,
             payment_subq.c.amount,
             payment_subq.c.payment_date,
             func.group_concat(model_routes.Room.room_number).label('room_numbers')
@@ -1424,7 +1339,8 @@ def get_payments_by_date():
             model_routes.Booking.status,
             model_routes.Customer.name,
             model_routes.Customer.phone,
-            payment_subq.c.payment_mode
+            payment_subq.c.payment_mode,
+            payment_subq.c.payment_status
         )
         .order_by(func.min(model_routes.Room.room_number))
         .all()
@@ -1616,6 +1532,7 @@ def get_payments_by_date():
             "customer_name": format_name_upper(row.customer_name),
             "contact_number": row.contact_number,
             "payment_mode": row.payment_mode.upper(),
+            "payment_status": row.payment_status,
             "amount": row.amount,
             "payment_date": row.payment_date,
             "room_numbers": row.room_numbers.split(',') if row.room_numbers else []
