@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 from model import model_routes
 import phonenumbers
+from phonenumbers import PhoneNumberType
 from flask import request, jsonify
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, and_, or_, cast, Date
@@ -113,7 +114,7 @@ def booking_active_on_date(b, target_date):
     if not b_checkin:
         return False
     if b_checkout:
-        return b_checkin <= target_date < b_checkout
+        return b_checkin <= target_date <= b_checkout
     return b_checkin <= target_date
 
 
@@ -506,13 +507,32 @@ def daily_chart():
         return jsonify({"error": str(e)}), 500
 
 
-def format_phone_number(phone_number, default_country="IN"):
+def format_phone_number(phone_number):
     try:
-        # Parse and format the phone number
-        parsed_number = phonenumbers.parse(phone_number, default_country)
-        return phonenumbers.format_number(parsed_number, phonenumbers.PhoneNumberFormat.E164)
+        # Parse as Indian number
+        parsed = phonenumbers.parse(phone_number, "IN")
+
+        # Validate
+        if not phonenumbers.is_valid_number(parsed):
+            raise ValueError("Invalid phone number.")
+
+        # Ensure it is an Indian number
+        if phonenumbers.region_code_for_number(parsed) != "IN":
+            raise ValueError("Only Indian phone numbers are allowed.")
+
+        # Ensure it is a mobile number
+        number_type = phonenumbers.number_type(parsed)
+        if number_type not in (
+                PhoneNumberType.MOBILE,
+                PhoneNumberType.FIXED_LINE_OR_MOBILE,
+        ):
+            raise ValueError("Only mobile numbers are allowed.")
+
+        # Return only the national number (10 digits)
+        return str(parsed.national_number)
+
     except phonenumbers.NumberParseException:
-        raise ValueError("Invalid phone number!")
+        raise ValueError("Invalid phone number.")
 
 
 @guest_bp.route('/api/existing_customers', methods=['GET'])
@@ -555,7 +575,7 @@ def create_booking():
                 address=personal_info.get("address", ""),
                 email=personal_info.get("email", ""),
                 identity=personal_info.get("identity", ""),
-                phone=personal_info.get("phone")
+                phone=format_phone_number(personal_info.get("phone"))
             )
             model_routes.db.session.add(customer)
             model_routes.db.session.flush()
@@ -1098,6 +1118,54 @@ def check_rooms_dashboard():
             guest_gst_no = gst_mapping.guest_gst_no if gst_mapping else None
             guest_company_name = gst_mapping.guest_company_name if gst_mapping else None
 
+            # GST Mapping — current booking
+            gst_mapping = model_routes.GSTBillMapping.query.filter_by(
+                booking_id=booking.id
+            ).first()
+
+            gst_bill_no        = gst_mapping.gst_bill_no        if gst_mapping else None
+            guest_gst_no       = gst_mapping.guest_gst_no       if gst_mapping else None
+            guest_company_name = gst_mapping.guest_company_name if gst_mapping else None
+
+            # Auto-populate GST from previous booking
+            # if current booking has no GST number filled
+            if not guest_gst_no:
+                # Step 1: Get customer phone from current booking
+                customer_phone = booking.customer.phone if booking.customer else None
+
+                if customer_phone:
+                    # Step 2: Find all customers with same phone
+                    # (could be same customer registered multiple times)
+                    matching_customers = model_routes.Customer.query.filter_by(
+                        phone=customer_phone
+                    ).all()
+
+                    matching_customer_ids = [c.id for c in matching_customers]
+
+                    if matching_customer_ids:
+                        # Step 3: Find most recent booking by these customers
+                        # that has a GST mapping with guest_gst_no filled
+                        previous_gst = (
+                            model_routes.GSTBillMapping.query
+                            .join(
+                                model_routes.Booking,
+                                model_routes.GSTBillMapping.booking_id == model_routes.Booking.id
+                            )
+                            .filter(
+                                model_routes.Booking.customer_id.in_(matching_customer_ids),
+                                model_routes.Booking.id != booking.id,  # exclude current booking
+                                model_routes.GSTBillMapping.guest_gst_no != None,
+                                model_routes.GSTBillMapping.guest_gst_no != "",
+                                )
+                            .order_by(model_routes.Booking.check_in_date.desc())
+                            .first()
+                        )
+
+                        if previous_gst:
+                            guest_gst_no       = previous_gst.guest_gst_no
+                            guest_company_name = previous_gst.guest_company_name
+
+
             # Serialize booking (same as /api/search_booking)
             booking_details.append({
                 'booking_id': booking.id,
@@ -1616,7 +1684,7 @@ def get_payments_by_date():
                 br.room.room_number for br in booking.room_associations
             ]
         })
-    return jsonify({
+s    return jsonify({
         "payment_details": payment_details,
         "pending_payment_details": pending_payment_details,
         "expense_details": expense_details,
@@ -1764,3 +1832,285 @@ def add_expense():
     model_routes.db.session.commit()
 
     return jsonify({'message': 'New Expense Record created successfully'}), 201
+
+"""
+ADD THIS ROUTE TO YOUR guest_routes.py file
+Place it after the daily_chart route (around line 500+)
+"""
+
+from calendar import monthrange
+
+# ─────────────────────────────────────────────────────────────
+# ROOM CONFIGURATION — Hotel Sri Krishna
+# ─────────────────────────────────────────────────────────────
+ROOM_CONFIG = {
+    "luxury": {
+        "ac":     ["001", "101", "201", "203", "205", "301", "305"],   # 7 AC Luxury
+        "non_ac": ["003", "105"],                                        # 2 Non-AC Luxury
+    },
+    "studio": {
+        "ac":     ["202", "204", "302", "304"],   # 4 AC Studio
+        "non_ac": ["002", "102", "104"],           # 3 Non-AC Studio
+    },
+    "triple": {
+        "ac":     ["303"],   # 1 AC Triple
+        "non_ac": ["103"],   # 1 Non-AC Triple
+    },
+}
+
+# Build flat lookup: room_number -> {category, ac_type}
+ROOM_LOOKUP = {}
+for category, ac_map in ROOM_CONFIG.items():
+    for ac_type, rooms in ac_map.items():
+        for rnum in rooms:
+            ROOM_LOOKUP[rnum] = {"category": category, "ac_type": ac_type}
+
+
+@guest_bp.route("/api/monthly-chart", methods=["GET"])
+def monthly_chart():
+    """
+    Query params:
+      month=1-12   (required)
+      year=YYYY    (required)
+
+    Returns per-day occupancy breakdown by category + MMT bookings.
+    """
+    try:
+        month_str = request.args.get("month")
+        year_str  = request.args.get("year")
+
+        if not month_str or not year_str:
+            return jsonify({"error": "missing 'month' or 'year' param"}), 400
+
+        month = int(month_str)
+        year  = int(year_str)
+
+        if not (1 <= month <= 12):
+            return jsonify({"error": "month must be 1-12"}), 400
+
+        db          = model_routes.db
+        Booking     = model_routes.Booking
+        BookingRoom = model_routes.BookingRoom
+        Room        = model_routes.Room
+
+        # ── Date range for the month ──────────────────────────
+        from datetime import date as date_cls
+        first_day = date_cls(year, month, 1)
+        last_day  = date_cls(year, month, monthrange(year, month)[1])
+
+        # ── Fetch ALL overlapping bookings for this month ─────
+        # A booking overlaps the month if:
+        #   check_in_date  <= last_day of month
+        #   expected_check_out_date >= first_day of month  (or is NULL)
+        overlapping_br_rows = (
+            db.session.query(BookingRoom)
+            .join(Booking, BookingRoom.booking_id == Booking.id)
+            .join(Room, BookingRoom.room_id == Room.id)
+            .filter(
+                Booking.status.in_(["Confirmed", "Checked-In", "Checked-Out"]),
+                func.date(Booking.check_in_date) <= last_day,
+                or_(
+                    Booking.expected_check_out_date == None,
+                    func.date(Booking.expected_check_out_date) >= first_day,
+                    ),
+                )
+            .options(
+                joinedload(BookingRoom.booking),
+                joinedload(BookingRoom.room),
+            )
+            .all()
+        )
+
+        # ── Build day-by-day breakdown ────────────────────────
+        from datetime import timedelta
+
+        days_in_month = monthrange(year, month)[1]
+        result_days = []
+
+        for day_num in range(1, days_in_month + 1):
+            target_date = date_cls(year, month, day_num)
+
+            # Initialize counters
+            counts = {
+                "luxury":  {"ac": {"total": 7, "booked": 0, "mmt": 0},
+                            "non_ac": {"total": 2, "booked": 0, "mmt": 0}},
+                "studio":  {"ac": {"total": 4, "booked": 0, "mmt": 0},
+                            "non_ac": {"total": 3, "booked": 0, "mmt": 0}},
+                "triple":  {"ac": {"total": 1, "booked": 0, "mmt": 0},
+                            "non_ac": {"total": 1, "booked": 0, "mmt": 0}},
+            }
+
+            total_booked = 0
+            total_mmt    = 0
+            seen_booking_room_ids = set()
+
+            for br in overlapping_br_rows:
+                b    = br.booking
+                room = br.room
+
+                # Skip if not active on this date
+                b_checkin  = b.check_in_date.date() if b.check_in_date else None
+                b_checkout = b.expected_check_out_date.date() if b.expected_check_out_date else None
+
+                if b_checkout is None and getattr(b, "duration_of_stay", None):
+                    b_checkout = (b.check_in_date + timedelta(days=b.duration_of_stay)).date()
+
+                if not b_checkin:
+                    continue
+
+                # Active = checkin <= target < checkout
+                if b_checkout:
+                    is_active = b_checkin <= target_date <= b_checkout
+                else:
+                    is_active = b_checkin <= target_date
+
+                if not is_active:
+                    continue
+
+                # Avoid double-counting same booking+room
+                key = (br.booking_id, br.room_id)
+                if key in seen_booking_room_ids:
+                    continue
+                seen_booking_room_ids.add(key)
+
+                # Map room number to category
+                room_info = ROOM_LOOKUP.get(str(room.room_number))
+                if not room_info:
+                    # Fallback: use room model's own fields
+                    rtype = (room.room_type or "").lower()
+                    if "luxury" in rtype:
+                        cat = "luxury"
+                    elif "studio" in rtype:
+                        cat = "studio"
+                    elif "triple" in rtype:
+                        cat = "triple"
+                    else:
+                        cat = "luxury"
+                    ac_type = "ac" if room.is_ac else "non_ac"
+                else:
+                    cat     = room_info["category"]
+                    ac_type = room_info["ac_type"]
+
+                counts[cat][ac_type]["booked"] += 1
+                total_booked += 1
+
+                # MMT detection: mode == "online"
+                is_mmt = (b.mode or "").lower() == "online"
+                if is_mmt:
+                    counts[cat][ac_type]["mmt"] += 1
+                    total_mmt += 1
+
+            # ── Totals for the day ───────────────────────────
+            total_rooms = 18
+            occ_pct = round((total_booked / total_rooms) * 100, 1)
+
+            # ── Color band ───────────────────────────────────
+            # 🟢 GREEN  = 0 booked
+            # 🔵 BLUE   = 1-5  (1-28%)
+            # 🟡 YELLOW = 6-11 (29-61%)
+            # 🟠 ORANGE = 12-15 (62-83%)
+            # 🔴 RED    = 16-18 (84-100%)
+            if total_booked == 0:
+                color = "green"
+            elif total_booked <= 5:
+                color = "blue"
+            elif total_booked <= 11:
+                color = "yellow"
+            elif total_booked <= 15:
+                color = "orange"
+            else:
+                color = "red"
+
+            # ── MMT suggestion ────────────────────────────────
+            DEFAULT_MMT_LUXURY = 2
+            DEFAULT_MMT_STUDIO = 2
+
+            lux_available = (
+                    counts["luxury"]["ac"]["total"]     - counts["luxury"]["ac"]["booked"] +
+                    counts["luxury"]["non_ac"]["total"] - counts["luxury"]["non_ac"]["booked"]
+            )
+            std_available = (
+                    counts["studio"]["ac"]["total"]     - counts["studio"]["ac"]["booked"] +
+                    counts["studio"]["non_ac"]["total"] - counts["studio"]["non_ac"]["booked"]
+            )
+            lux_ac_available = (
+                    counts["luxury"]["ac"]["total"]     - counts["luxury"]["ac"]["booked"]
+            )
+            std_ac_available = (
+                    counts["studio"]["ac"]["total"]     - counts["studio"]["ac"]["booked"]
+            )
+            lux_non_ac_available = (
+                    counts["luxury"]["non_ac"]["total"] - counts["luxury"]["non_ac"]["booked"]
+            )
+            std_non_ac_available = (
+                    counts["studio"]["non_ac"]["total"] - counts["studio"]["non_ac"]["booked"]
+            )
+
+            lux_mmt = counts["luxury"]["ac"]["mmt"] + counts["luxury"]["non_ac"]["mmt"]
+            std_mmt = counts["studio"]["ac"]["mmt"] + counts["studio"]["non_ac"]["mmt"]
+
+            lux_ac_mmt = counts["luxury"]["ac"]["mmt"]
+            std_ac_mmt = counts["studio"]["ac"]["mmt"]
+            lux_non_ac_mmt = counts["luxury"]["non_ac"]["mmt"]
+            std_non_ac_mmt = counts["studio"]["non_ac"]["mmt"]
+
+            suggestions = []
+            if color == "red":
+                suggestions.append("CLOSE MMT — hotel nearly full")
+            else:
+                if lux_ac_mmt >= DEFAULT_MMT_LUXURY and lux_ac_available > 1:
+                    suggestions.append(f"Open {min(2, lux_ac_available)} more Luxury on MMT")
+                if lux_ac_available <= 1:
+                    suggestions.append(f"CLOSE LUXURY on MMT")
+                if std_non_ac_mmt >= DEFAULT_MMT_STUDIO and std_available > 1:
+                    suggestions.append(f"Open {min(2, std_available)} more Studio on MMT")
+                if std_available <= 1:
+                    suggestions.append(f"CLOSE STUDIO on MMT")
+
+            result_days.append({
+                "date":          target_date.strftime("%Y-%m-%d"),
+                "day_name":      target_date.strftime("%a"),
+                "total_booked":  total_booked,
+                "total_rooms":   total_rooms,
+                "occupancy_pct": occ_pct,
+                "color":         color,
+                "luxury": {
+                    "ac":     counts["luxury"]["ac"],
+                    "non_ac": counts["luxury"]["non_ac"],
+                },
+                "studio": {
+                    "ac":     counts["studio"]["ac"],
+                    "non_ac": counts["studio"]["non_ac"],
+                },
+                "triple": {
+                    "ac":     counts["triple"]["ac"],
+                    "non_ac": counts["triple"]["non_ac"],
+                },
+                "mmt": {
+                    "luxury": lux_mmt,
+                    "studio": std_mmt,
+                    "triple": counts["triple"]["ac"]["mmt"] + counts["triple"]["non_ac"]["mmt"],
+                },
+                "available": {
+                    "luxury": lux_available,
+                    "studio": std_available,
+                    "triple": (counts["triple"]["ac"]["total"] - counts["triple"]["ac"]["booked"] +
+                               counts["triple"]["non_ac"]["total"] - counts["triple"]["non_ac"]["booked"]),
+                },
+                "suggestions": suggestions,
+            })
+
+        month_names = ["", "January", "February", "March", "April", "May", "June",
+                       "July", "August", "September", "October", "November", "December"]
+
+        return jsonify({
+            "month":      month,
+            "year":       year,
+            "month_name": month_names[month],
+            "days":       result_days,
+        }), 200
+
+    except Exception as e:
+        print(f"[monthly-chart] ERROR: {e}")
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
