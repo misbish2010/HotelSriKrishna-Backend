@@ -1684,7 +1684,7 @@ def get_payments_by_date():
                 br.room.room_number for br in booking.room_associations
             ]
         })
-s    return jsonify({
+    return jsonify({
         "payment_details": payment_details,
         "pending_payment_details": pending_payment_details,
         "expense_details": expense_details,
