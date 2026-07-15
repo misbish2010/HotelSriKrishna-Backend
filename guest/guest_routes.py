@@ -1948,24 +1948,54 @@ def monthly_chart():
                 b    = br.booking
                 room = br.room
 
-                # Skip if not active on this date
-                b_checkin  = b.check_in_date.date() if b.check_in_date else None
-                b_checkout = b.expected_check_out_date.date() if b.expected_check_out_date else None
+                # ── Get checkout date ─────────────────────────────
+                b_checkin = b.check_in_date.date() if b.check_in_date else None
 
-                if b_checkout is None and getattr(b, "duration_of_stay", None):
+                # Try expected_check_out_date first
+                if b.expected_check_out_date:
+                    b_checkout = b.expected_check_out_date.date()
+
+                # Fallback: actual check_out_date (already checked out)
+                elif b.check_out_date:
+                    b_checkout = b.check_out_date.date()
+
+                # Fallback: calculate from check_in + duration_of_stay
+                elif getattr(b, "duration_of_stay", None) and b.duration_of_stay > 0:
                     b_checkout = (b.check_in_date + timedelta(days=b.duration_of_stay)).date()
 
-                if not b_checkin:
+                # No checkout date at all → skip this booking (data issue)
+                else:
+                    b_checkout = None
+
+                if not b_checkin or not b_checkout:
                     continue
 
-                # Active = checkin <= target < checkout
-                if b_checkout:
-                    is_active = b_checkin <= target_date <= b_checkout
-                else:
-                    is_active = b_checkin <= target_date
+                # ── Is room occupied OVERNIGHT on target_date? ────
+                # Strictly less than checkout date
+                # Checkout day = room is freeing up = NOT occupied
+                is_active = b_checkin <= target_date < b_checkout
 
                 if not is_active:
                     continue
+
+                # Skip if not active on this date
+                # b_checkin  = b.check_in_date.date() if b.check_in_date else None
+                # b_checkout = b.expected_check_out_date.date() if b.expected_check_out_date else None
+                #
+                # if b_checkout is None and getattr(b, "duration_of_stay", None):
+                #     b_checkout = (b.check_in_date + timedelta(days=b.duration_of_stay)).date()
+                #
+                # if not b_checkin:
+                #     continue
+                #
+                # # Active = checkin <= target < checkout
+                # if b_checkout:
+                #     is_active = b_checkin <= target_date <= b_checkout
+                # else:
+                #     is_active = b_checkin <= target_date
+                #
+                # if not is_active:
+                #     continue
 
                 # Avoid double-counting same booking+room
                 key = (br.booking_id, br.room_id)
