@@ -114,7 +114,7 @@ def booking_active_on_date(b, target_date):
     if not b_checkin:
         return False
     if b_checkout:
-        return b_checkin <= target_date <= b_checkout
+        return b_checkin <= target_date < b_checkout
     return b_checkin <= target_date
 
 
