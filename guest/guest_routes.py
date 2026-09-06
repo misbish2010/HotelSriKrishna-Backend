@@ -1014,7 +1014,7 @@ def get_or_create_invoice(booking_id):
     if not booking.expected_check_out_date:
         return jsonify({"message": "Checkout date not available"}), 400
 
-    invoice_date = booking.expected_check_out_date.date()  # 🔑 KEY CHANGE
+    invoice_date = datetime.now().date()   #booking.expected_check_out_date.date()  # 🔑 KEY CHANGE
 
     # 3️⃣ Financial year calculation
     fy_start = invoice_date.year if invoice_date.month >= 4 else invoice_date.year - 1
